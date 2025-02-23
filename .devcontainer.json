@@ -1,0 +1,19 @@
+{
+    "name": "face_detection",
+    "service": "face_detection",
+    "dockerComposeFile": "./docker-compose.yml",
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "ms-iot.vscode",
+                "ms-vscode.cpptools-extension-pack"
+            ]
+        }
+    },
+    "workspaceFolder": "/home/dkhai/workspace",
+    "shutdownAction": "stopCompose",
+    "remoteUser": "dkhai",
+    "remoteEnv": {
+        "USER_ID": "1000"
+    }
+}
