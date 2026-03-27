@@ -1,0 +1,53 @@
+version: '3.8'
+services:
+  face_detection:
+    user: 1000:1000
+    container_name: face_detection
+    ports:
+      - "5000:5000"
+    cap_add:
+      - NET_ADMIN
+
+    privileged: true
+    restart: always
+    stdin_open: true
+    network_mode: host
+
+    security_opt:
+      - seccomp:unconfined
+    # shm_size: '300gb'
+
+    environment:  
+      DISPLAY: ${DISPLAY}
+      CCACHE_DIR: ccache
+      QT_X11_NO_MITSHM: 1 
+      #xhost +local:docker
+
+    volumes:
+      - ${HOME}/.Xauthority:/home/dkhai/.Xauthority:rw
+      - ./workspace:/home/dkhai/workspace:rw
+      - /tmp/.X11-unix:/tmp/.X11-unix  # Enable GUI display
+      - /dev:/dev:rw
+      - /dev/shm:/dev/shm:rw
+      - /etc/localtime:/etc/localtime:ro
+      - /var/run/dbus:/var/run/dbus:rw
+
+      
+      
+
+    tty: "true"
+    ulimits:
+      memlock: -1
+
+    build: 
+      context: .
+      shm_size: '2gb'
+      dockerfile: ./Dockerfile
+      args:
+        - USER_ID=1000
+        - GROUP_ID=1000
+        - USER_NAME=dkhai
+      x-bake:
+        tags:
+          - face_detection:v1.0
+
