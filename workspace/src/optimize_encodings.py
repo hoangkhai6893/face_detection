@@ -4,6 +4,7 @@ Face Recognition Optimizer
 Optimizes existing face encodings for better performance and accuracy
 """
 
+import logging
 import os
 import pickle
 import numpy as np
@@ -13,6 +14,9 @@ from ultralytics import YOLO
 from collections import defaultdict
 from typing import List, Dict, Tuple
 import time
+
+import config
+from core.face_utils import extract_face_region
 
 class FaceEncodingOptimizer:
     def __init__(self, dataset_path: str, model_path: str):
@@ -25,19 +29,20 @@ class FaceEncodingOptimizer:
         """
         self.dataset_path = dataset_path
         self.model_path = model_path
+        self.logger = logging.getLogger(__name__)
         self.yolo_model = YOLO(model_path)
-        
+
         # Optimization parameters
-        self.quality_threshold = 0.6
-        self.max_encodings_per_person = 20  # Optimal number of encodings per person
-        self.clustering_threshold = 0.4  # Distance threshold for clustering similar faces
+        self.quality_threshold = config.OPTIMIZE_QUALITY_THRESHOLD
+        self.max_encodings_per_person = config.MAX_ENCODINGS_PER_PERSON
+        self.clustering_threshold = config.CLUSTERING_THRESHOLD
     
     def load_existing_encodings(self) -> Tuple[List[np.ndarray], List[str]]:
         """Load existing face encodings"""
-        encodings_file = os.path.join(os.path.dirname(self.dataset_path), "face_encodings.pkl")
-        
+        encodings_file = os.path.join(config.ENCODINGS_DIR, "face_encodings_hybrid.pkl")
+
         if os.path.exists(encodings_file):
-            print("Loading existing encodings...")
+            self.logger.info("Loading existing encodings...")
             with open(encodings_file, 'rb') as f:
                 data = pickle.load(f)
                 return data['encodings'], data['names']
@@ -56,40 +61,60 @@ class FaceEncodingOptimizer:
         """
         image = cv2.imread(image_path)
         if image is None:
+            self.logger.warning("Could not read image: %s", image_path)
             return []
-        
+
         # Use YOLO to detect faces
         results = self.yolo_model(image, verbose=False)
         face_encodings_with_quality = []
-        
+        yolo_found = False
+
         for result in results:
-            if result.boxes is not None:
-                for box in result.boxes:
-                    confidence = float(box.conf[0])
-                    
-                    if confidence > 0.7:  # High confidence threshold
-                        x1, y1, x2, y2 = map(int, box.xyxy[0])
-                        
-                        # Extract face with padding
-                        padding = 20
-                        x1_pad = max(0, x1 - padding)
-                        y1_pad = max(0, y1 - padding)
-                        x2_pad = min(image.shape[1], x2 + padding)
-                        y2_pad = min(image.shape[0], y2 + padding)
-                        
-                        face_image = image[y1_pad:y2_pad, x1_pad:x2_pad]
-                        
-                        # Convert to RGB and get encoding
-                        rgb_face = cv2.cvtColor(face_image, cv2.COLOR_BGR2RGB)
-                        encodings = face_recognition.face_encodings(rgb_face)
-                        
-                        if len(encodings) > 0:
-                            # Calculate quality score based on face size and detection confidence
-                            face_area = (x2 - x1) * (y2 - y1)
-                            quality_score = confidence * min(1.0, face_area / 10000)  # Normalize by area
-                            
-                            face_encodings_with_quality.append((encodings[0], quality_score))
-        
+            if result.boxes is None:
+                continue
+            for box in result.boxes:
+                confidence = float(box.conf[0])
+
+                if confidence > config.HIGH_CONFIDENCE_THRESHOLD:
+                    x1, y1, x2, y2 = map(int, box.xyxy[0])
+                    face_image = extract_face_region(
+                        image, x1, y1, x2, y2, config.OPTIMIZE_PADDING
+                    )
+                    if face_image is None:
+                        continue
+
+                    rgb_face = cv2.cvtColor(face_image, cv2.COLOR_BGR2RGB)
+                    encodings = face_recognition.face_encodings(rgb_face)
+
+                    if len(encodings) > 0:
+                        face_area = (x2 - x1) * (y2 - y1)
+                        quality_score = confidence * min(1.0, face_area / config.FACE_AREA_NORMALIZATION)
+                        face_encodings_with_quality.append((encodings[0], quality_score))
+                        yolo_found = True
+
+        # --- Fallback: YOLO missed the face (dark/blurry/angled image) ---
+        # Run face_recognition directly on the full image.
+        # These encodings are assigned a lower quality score so they don't outcompete
+        # clean images in clustering, but they ARE preserved for adverse-condition coverage.
+        if not yolo_found:
+            try:
+                rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                fb_encodings = face_recognition.face_encodings(rgb_image)
+                if fb_encodings:
+                    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+                    brightness = np.mean(gray) / 255.0
+                    sharpness = min(1.0, cv2.Laplacian(gray, cv2.CV_64F).var() / 500.0)
+                    # Cap at 0.3 so fallback images are deprioritised in clustering
+                    # but still pass the OPTIMIZE_QUALITY_THRESHOLD (now 0.15)
+                    fallback_quality = min(0.3, (brightness + sharpness) / 2)
+                    face_encodings_with_quality.append((fb_encodings[0], fallback_quality))
+                    self.logger.debug(
+                        "Fallback encoding used for: %s (quality=%.2f)",
+                        os.path.basename(image_path), fallback_quality
+                    )
+            except Exception as e:
+                self.logger.debug("Fallback encoding failed for %s: %s", image_path, e)
+
         return face_encodings_with_quality
     
     def cluster_similar_encodings(self, encodings: List[np.ndarray], qualities: List[float]) -> List[int]:
@@ -131,16 +156,31 @@ class FaceEncodingOptimizer:
             
             clusters.append(cluster)
         
-        # Select best encoding from each cluster (highest quality)
+        # Select the most representative encoding from each cluster.
+        # "Most representative" = closest to the cluster centroid (the average face).
+        # This avoids always picking the clearest/best-lit image and discarding
+        # adverse-condition examples that happen to fall in the same cluster.
         selected_indices = []
         for cluster in clusters:
-            best_idx = max(cluster, key=lambda x: qualities[x])
-            selected_indices.append(best_idx)
-        
-        # If we still have too many, select top quality ones
+            if len(cluster) == 1:
+                selected_indices.append(cluster[0])
+                continue
+            cluster_encs = np.array([encodings[i] for i in cluster])
+            centroid = cluster_encs.mean(axis=0)
+            dist_to_centroid = [np.linalg.norm(encodings[i] - centroid) for i in cluster]
+            representative = cluster[int(np.argmin(dist_to_centroid))]
+            selected_indices.append(representative)
+
+        # If we still have too many, keep a quality-diverse subset:
+        # sort by quality and pick evenly spaced indices so we retain
+        # both high-quality and low-quality (adverse-condition) representatives.
         if len(selected_indices) > self.max_encodings_per_person:
-            selected_indices.sort(key=lambda x: qualities[x], reverse=True)
-            selected_indices = selected_indices[:self.max_encodings_per_person]
+            selected_indices.sort(key=lambda x: qualities[x])
+            step = len(selected_indices) / self.max_encodings_per_person
+            selected_indices = [
+                selected_indices[int(i * step)]
+                for i in range(self.max_encodings_per_person)
+            ]
         
         return selected_indices
     
@@ -159,7 +199,7 @@ class FaceEncodingOptimizer:
         if not os.path.exists(person_folder):
             return [], 0, 0
         
-        print(f"\n🔄 Optimizing encodings for {person_name}...")
+        self.logger.info("Optimizing encodings for %s...", person_name)
         
         # Extract all face encodings with quality scores
         all_encodings = []
@@ -180,7 +220,7 @@ class FaceEncodingOptimizer:
         original_count = len(all_encodings)
         
         if len(all_encodings) == 0:
-            print(f"  ❌ No quality faces found for {person_name}")
+            self.logger.warning("No quality faces found for %s", person_name)
             return [], original_count, 0
         
         # Cluster and select best encodings
@@ -189,9 +229,12 @@ class FaceEncodingOptimizer:
         
         final_count = len(optimized_encodings)
         
-        print(f"  ✅ {person_name}: {original_count} → {final_count} encodings")
-        print(f"     📊 Quality range: {min(all_qualities):.2f} - {max(all_qualities):.2f}")
-        print(f"     🎯 Selected avg quality: {np.mean([all_qualities[i] for i in selected_indices]):.2f}")
+        self.logger.info(
+            "%s: %d -> %d encodings | quality range %.2f-%.2f | selected avg %.2f",
+            person_name, original_count, final_count,
+            min(all_qualities), max(all_qualities),
+            np.mean([all_qualities[i] for i in selected_indices])
+        )
         
         return optimized_encodings, original_count, final_count
     
@@ -202,10 +245,10 @@ class FaceEncodingOptimizer:
         Returns:
             True if successful
         """
-        print("🚀 Starting face encoding optimization...")
-        
+        self.logger.info("Starting face encoding optimization...")
+
         if not os.path.exists(self.dataset_path):
-            print(f"❌ Dataset path not found: {self.dataset_path}")
+            self.logger.error("Dataset path not found: %s", self.dataset_path)
             return False
         
         # Get all person folders
@@ -213,7 +256,7 @@ class FaceEncodingOptimizer:
                          if os.path.isdir(os.path.join(self.dataset_path, d))]
         
         if not person_folders:
-            print("❌ No person folders found in dataset")
+            self.logger.error("No person folders found in dataset")
             return False
         
         # Optimize encodings for each person
@@ -232,56 +275,54 @@ class FaceEncodingOptimizer:
         
         # Save optimized encodings
         if all_optimized_encodings:
-            encodings_file = os.path.join(os.path.dirname(self.dataset_path), "face_encodings.pkl")
-            backup_file = os.path.join(os.path.dirname(self.dataset_path), "face_encodings_backup.pkl")
+            encodings_file = os.path.join(config.ENCODINGS_DIR, "face_encodings_hybrid.pkl")
+            backup_file = os.path.join(config.ENCODINGS_DIR, "face_encodings_hybrid_backup.pkl")
             
             # Create backup of original encodings
             if os.path.exists(encodings_file):
                 os.rename(encodings_file, backup_file)
-                print(f"💾 Original encodings backed up to: {backup_file}")
-            
+                self.logger.info("Original encodings backed up to: %s", backup_file)
+
             # Save new optimized encodings
             with open(encodings_file, 'wb') as f:
                 pickle.dump({
                     'encodings': all_optimized_encodings,
                     'names': all_optimized_names
                 }, f)
-            
-            print(f"\n✅ Optimization completed!")
-            print(f"📊 Summary:")
-            print(f"   👥 People optimized: {len(person_folders)}")
-            print(f"   🔢 Total encodings: {total_original} → {total_final}")
-            print(f"   📈 Reduction: {(total_original - total_final) / total_original * 100:.1f}%")
-            print(f"   💾 Saved to: {encodings_file}")
-            
+
+            reduction_pct = (total_original - total_final) / total_original * 100
+            self.logger.info(
+                "Optimization completed — people: %d | encodings: %d -> %d (%.1f%% reduction) | saved to: %s",
+                len(person_folders), total_original, total_final, reduction_pct, encodings_file
+            )
             return True
         else:
-            print("❌ No valid encodings generated")
+            self.logger.error("No valid encodings generated")
             return False
     
     def benchmark_performance(self):
         """
         Benchmark the performance improvement
         """
-        print("\n🏃 Running performance benchmark...")
-        
+        self.logger.info("Running performance benchmark...")
+
         # Load optimized encodings
-        encodings_file = os.path.join(os.path.dirname(self.dataset_path), "face_encodings.pkl")
-        backup_file = os.path.join(os.path.dirname(self.dataset_path), "face_encodings_backup.pkl")
-        
+        encodings_file = os.path.join(config.ENCODINGS_DIR, "face_encodings_hybrid.pkl")
+        backup_file = os.path.join(config.ENCODINGS_DIR, "face_encodings_hybrid_backup.pkl")
+
         if not os.path.exists(encodings_file):
-            print("❌ No optimized encodings found")
+            self.logger.error("No optimized encodings found")
             return
-        
+
         with open(encodings_file, 'rb') as f:
             optimized_data = pickle.load(f)
-        
-        print(f"📊 Current encodings: {len(optimized_data['encodings'])}")
-        
+
+        self.logger.info("Current encodings: %d", len(optimized_data['encodings']))
+
         if os.path.exists(backup_file):
             with open(backup_file, 'rb') as f:
                 backup_data = pickle.load(f)
-            print(f"📊 Original encodings: {len(backup_data['encodings'])}")
+            self.logger.info("Original encodings: %d", len(backup_data['encodings']))
             
             # Simple speed test
             test_encoding = optimized_data['encodings'][0] if optimized_data['encodings'] else None
@@ -300,39 +341,39 @@ class FaceEncodingOptimizer:
                 optimized_time = time.time() - start_time
                 
                 speedup = original_time / optimized_time if optimized_time > 0 else 1
-                
-                print(f"⚡ Performance improvement:")
-                print(f"   Original: {original_time:.3f}s (100 comparisons)")
-                print(f"   Optimized: {optimized_time:.3f}s (100 comparisons)")
-                print(f"   Speedup: {speedup:.1f}x faster")
+
+                self.logger.info(
+                    "Performance: original %.3fs vs optimized %.3fs (100 comparisons) — %.1fx faster",
+                    original_time, optimized_time, speedup
+                )
 
 
 def main():
     """
     Main function for face encoding optimization
     """
-    dataset_path = "/home/dkhai/workspace/family_images"
-    model_path = "/home/dkhai/workspace/src/yolov11n-face.pt"
-    
-    print("🎯 FACE ENCODING OPTIMIZER")
-    print("=" * 50)
-    
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        datefmt='%H:%M:%S'
+    )
+    logger = logging.getLogger(__name__)
+    logger.info("FACE ENCODING OPTIMIZER")
+
     try:
-        optimizer = FaceEncodingOptimizer(dataset_path, model_path)
-        
+        optimizer = FaceEncodingOptimizer(config.DATASET_PATH, config.MODEL_PATH)
+
         # Run optimization
         success = optimizer.optimize_all_encodings()
-        
+
         if success:
             # Run benchmark
             optimizer.benchmark_performance()
-        
-        print("\n✨ Optimization process completed!")
-        
+
+        logger.info("Optimization process completed.")
+
     except Exception as e:
-        print(f"❌ Error during optimization: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.exception("Error during optimization: %s", e)
 
 
 if __name__ == "__main__":

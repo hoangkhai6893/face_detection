@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Improved Hybrid Face Recognition System
+Face Recognition System
 - Uses YOLO for robust face detection (handles distant faces better)
-- Uses face_recognition for identification with error handling
+- Uses face_recognition library for identification with error handling
 - Optimized for speed and accuracy with configurable parameters
 """
 
@@ -20,6 +20,9 @@ import pickle
 import time
 from ultralytics import YOLO
 
+import config
+from core.face_utils import extract_face_region
+
 
 def setup_logging(verbose: bool = False) -> logging.Logger:
     """Setup logging configuration"""
@@ -32,7 +35,7 @@ def setup_logging(verbose: bool = False) -> logging.Logger:
     return logging.getLogger(__name__)
 
 
-class ImprovedHybridFaceRecognizer:
+class FaceRecognizer:
     def __init__(
         self,
         dataset_path: str,
@@ -47,8 +50,8 @@ class ImprovedHybridFaceRecognizer:
         logger: Optional[logging.Logger] = None
     ):
         """
-        Initialize the improved hybrid face recognizer
-        
+        Initialize the face recognizer.
+
         Args:
             dataset_path: Path to the root folder containing family member subfolders
             model_path: Path to YOLO face detection model
@@ -92,44 +95,8 @@ class ImprovedHybridFaceRecognizer:
             self.logger.warning(f"Dataset not found: {self.dataset_path}")
     
     def _get_default_encodings_path(self) -> str:
-        """Get default encodings file path"""
-        return os.path.join(
-            os.path.dirname(self.dataset_path), 
-            "face_encodings_hybrid.pkl"
-        )
-    
-    def _pad_box(
-        self, 
-        x1: int, 
-        y1: int, 
-        x2: int, 
-        y2: int, 
-        frame_shape: Tuple[int, ...], 
-        padding: int
-    ) -> Tuple[int, int, int, int]:
-        """Apply padding to bounding box with boundary checking"""
-        height, width = frame_shape[:2]
-        x1_pad = max(0, x1 - padding)
-        y1_pad = max(0, y1 - padding)
-        x2_pad = min(width, x2 + padding)
-        y2_pad = min(height, y2 + padding)
-        return x1_pad, y1_pad, x2_pad, y2_pad
-    
-    def _extract_face_region(
-        self, 
-        frame: np.ndarray, 
-        x1: int, 
-        y1: int, 
-        x2: int, 
-        y2: int, 
-        padding: int
-    ) -> Optional[np.ndarray]:
-        """Extract face region with padding"""
-        x1_pad, y1_pad, x2_pad, y2_pad = self._pad_box(
-            x1, y1, x2, y2, frame.shape, padding
-        )
-        face_region = frame[y1_pad:y2_pad, x1_pad:x2_pad]
-        return face_region if face_region.size > 0 else None
+        """Get default encodings file path (from config.ENCODINGS_DIR)."""
+        return os.path.join(config.ENCODINGS_DIR, "face_encodings_hybrid.pkl")
     
     def _load_encodings(self, encodings_file: Optional[str] = None):
         """Load face encodings from file or create from dataset"""
@@ -208,7 +175,7 @@ class ImprovedHybridFaceRecognizer:
                 if float(best_box.conf) > self.encoding_confidence:
                     x1, y1, x2, y2 = map(int, best_box.xyxy[0].cpu().numpy())
                     
-                    face_image = self._extract_face_region(
+                    face_image = extract_face_region(
                         image, x1, y1, x2, y2, self.encoding_padding
                     )
                     
@@ -282,7 +249,7 @@ class ImprovedHybridFaceRecognizer:
     ) -> str:
         """Recognize face in a specific region"""
         try:
-            face_region = self._extract_face_region(frame, x1, y1, x2, y2, self.padding)
+            face_region = extract_face_region(frame, x1, y1, x2, y2, self.padding)
             
             if face_region is None:
                 return "Invalid Region"
@@ -347,7 +314,7 @@ class ImprovedHybridFaceRecognizer:
     
     def run_recognition(self, camera_id: int = 0, frame_width: int = 1280, frame_height: int = 720):
         """Main recognition loop"""
-        self.logger.info("Starting improved hybrid face recognition...")
+        self.logger.info("Starting face recognition...")
         self.logger.info(f"  Tolerance: {self.tolerance}")
         self.logger.info(f"  Detection confidence: {self.detection_confidence}")
         self.logger.info("Press 'q' to quit")
@@ -400,7 +367,7 @@ class ImprovedHybridFaceRecognizer:
                     cv2.putText(frame, text, (10, y_pos),
                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
                 
-                cv2.imshow('Improved Hybrid Face Recognition', frame)
+                cv2.imshow('Face Recognition', frame)
                 
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord('q'):
@@ -418,49 +385,49 @@ class ImprovedHybridFaceRecognizer:
 def parse_args() -> argparse.Namespace:
     """Parse command line arguments"""
     parser = argparse.ArgumentParser(
-        description="Improved Hybrid Face Recognition System",
+        description="Face Recognition System",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
     
     parser.add_argument(
         '--dataset', '-d',
         type=str,
-        default='/home/dkhai/workspace/family_images',
+        default=config.DATASET_PATH,
         help='Path to dataset folder containing person subfolders'
     )
-    
+
     parser.add_argument(
         '--model', '-m',
         type=str,
-        default='/home/dkhai/workspace/src/yolov11n-face.pt',
+        default=config.MODEL_PATH,
         help='Path to YOLO face detection model'
     )
-    
+
     parser.add_argument(
         '--tolerance', '-t',
         type=float,
-        default=0.6,
+        default=config.TOLERANCE,
         help='Face matching tolerance (lower = more strict)'
     )
-    
+
     parser.add_argument(
         '--detection-confidence',
         type=float,
-        default=0.3,
+        default=config.DETECTION_CONFIDENCE,
         help='Minimum YOLO detection confidence'
     )
-    
+
     parser.add_argument(
         '--encoding-confidence',
         type=float,
-        default=0.5,
+        default=config.ENCODING_CONFIDENCE,
         help='Minimum YOLO confidence for encoding'
     )
-    
+
     parser.add_argument(
         '--padding', '-p',
         type=int,
-        default=15,
+        default=config.RECOGNITION_PADDING,
         help='Padding around face for recognition'
     )
     
@@ -481,14 +448,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         '--width',
         type=int,
-        default=1280,
+        default=config.FRAME_WIDTH,
         help='Camera frame width'
     )
-    
+
     parser.add_argument(
         '--height',
         type=int,
-        default=720,
+        default=config.FRAME_HEIGHT,
         help='Camera frame height'
     )
     
@@ -507,7 +474,7 @@ def main():
     logger = setup_logging(args.verbose)
     
     try:
-        recognizer = ImprovedHybridFaceRecognizer(
+        recognizer = FaceRecognizer(
             dataset_path=args.dataset,
             model_path=args.model,
             tolerance=args.tolerance,

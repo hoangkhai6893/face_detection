@@ -4,3 +4,12 @@
 workspace/family_images/
 workspace/*.pkl
 workspace/src/*.pkl
+workspace/data/*
+workspace/src/__pycache__/
+workspace/src/*/__pycache__/
+workspace/src/*/*/__pycache__/
+workspace/src/*/__init__.py
+workspace/src/*/*/__init__.py
+workspace/model/*
+workspace/tests/__pycache__/
+workspace/tests/__init__.py

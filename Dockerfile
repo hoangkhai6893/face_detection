@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM python:3.13-slim
 
 
 ARG USER_ID
@@ -12,7 +12,9 @@ ENV TZ=Asia/Tokyo
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone 
 
 RUN apt-get update -y
-RUN apt-get install -y wget curl git tmux imagemagick htop libsndfile1 nfs-common unzip cmake
+RUN apt-get install -y wget curl git tmux imagemagick htop libsndfile1 nfs-common unzip cmake libgl1 python3-opencv sudo 
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt-get install -y nodejs
+RUN npm install -g opencode-ai @anthropic-ai/claude-code
 RUN  apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
@@ -21,10 +23,9 @@ COPY requirements.txt .
 RUN pip install --only-binary=:all: --no-cache-dir -r requirements.txt || \
     (sed -i '/^dlib/d; /^face-recognition/d' requirements.txt && pip install --no-cache-dir -r requirements.txt)
 
-RUN apt-get update && apt-get install -y sudo 
+# RUN apt-get update && apt-get install -y sudo  
 # Since uid and gid will change at entrypoint, anything can be used
-RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt-get install -y nodejs
-RUN npm install -g opencode-ai @anthropic-ai/claude-code
+
 ARG USER_ID=1000
 ARG GROUP_ID=1000
 ENV USER_NAME=dkhai

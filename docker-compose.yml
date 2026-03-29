@@ -1,6 +1,7 @@
 version: '3.8'
 services:
   face_detection:
+    image: face_detection:v2.0
     user: 1000:1000
     container_name: face_detection
     ports:
@@ -49,5 +50,5 @@ services:
         - USER_NAME=dkhai
       x-bake:
         tags:
-          - face_detection:v1.0
+          - face_detection:v2.0
 

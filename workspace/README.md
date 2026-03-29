@@ -43,7 +43,16 @@ A comprehensive, hybrid face recognition system that combines YOLO for robust fa
 python --version
 
 # Install required packages
-pip install face-recognition opencv-python numpy ultralytics pickle
+pip install opencv-python numpy ultralytics pickle cmake dlib face_recognition
+```
+
+**Note**: The `dlib` package requires compilation. On some systems you may need:
+```bash
+# Ubuntu/Debian
+sudo apt-get install python3-dev libboost-python-dev cmake
+
+# If dlib fails to install, try:
+pip install dlib-bin
 ```
 
 ### System Setup
@@ -71,10 +80,7 @@ cd /home/dkhai/workspace
 # 1. Navigate to project directory
 cd /home/dkhai/workspace/src
 
-# 2. Launch system menu
-python launcher.py
-
-# 3. Or run directly:
+# 2. Run the main recognition system:
 python improved_hybrid_recognition.py
 ```
 
@@ -184,38 +190,31 @@ python optimize_encodings.py
 
 ### System Launcher
 
-**File**: `launcher.py`
+**File**: Use `quick_start.sh` or `setup.sh`
 
 ```bash
-python launcher.py
-```
+# Quick start launcher
+./quick_start.sh
 
-**Menu Options**:
-1. 🚀 Hybrid Face Recognition (main system)
-2. 📚 Face Learning Mode (training)
-3. 🔍 YOLO Face Detection Only
-4. 🎭 Original Face Recognition
-5. 📊 System Status & Configuration
-6. 🚪 Exit
+# Or verify setup
+./setup.sh
+```
 
 ## 📁 Dataset Setup
 
 ### Directory Structure
 ```
 family_images/
-├── dad/
-│   ├── dad_001.jpg
-│   ├── dad_002.jpg
+├── Khai/                                 # Person folder name (as shown in system)
+│   ├── khai_001.jpg
+│   ├── khai_002.jpg
 │   └── ... (20-50 images)
-├── mom/
-│   ├── mom_001.jpg
-│   ├── mom_002.jpg
+├── MaiAnh/
+│   ├── maianh_001.jpg
 │   └── ... (20-50 images)
-├── sister/
-│   ├── sister_001.jpg
-│   └── ... (20-50 images)
-└── brother/
-    ├── brother_001.jpg
+# Add new people: create new folder with their name
+└── new_person/
+    ├── new_person_001.jpg
     └── ... (20-50 images)
 ```
 
@@ -316,11 +315,17 @@ ls src/yolov11n-face.pt
 
 **❌ "face_recognition import error"**
 ```bash
-# Install dependencies
-pip install face-recognition
+# Install cmake first (required for dlib)
+pip install cmake
+
+# Install dlib (requires compilation)
+pip install dlib
+
+# Then install face_recognition
+pip install face_recognition
 
 # For Ubuntu/Debian
-sudo apt-get install python3-dev libboost-python-dev
+sudo apt-get install python3-dev libboost-python-dev cmake
 ```
 
 **❌ "Poor recognition accuracy"**
@@ -339,8 +344,7 @@ sudo apt-get install python3-dev libboost-python-dev
 
 **Check system status**:
 ```bash
-python launcher.py
-# Select option 5: System Status & Configuration
+./setup.sh
 ```
 
 **Monitor real-time performance**:
@@ -353,10 +357,12 @@ python launcher.py
 ```
 /home/dkhai/workspace/
 ├── README.md                              # This file
+├── quick_start.sh                         # Quick start script
+├── setup.sh                               # Setup verification script
 ├── family_images/                         # Training dataset
-│   ├── person1/                          # Individual person folders
+│   ├── Khai/                             # Person folder (add your own)
 │   │   ├── *.jpg                        # Training images
-│   └── person2/
+│   └── MaiAnh/                          # Another person folder
 ├── face_encodings_hybrid.pkl              # Hybrid system encodings
 ├── face_encodings.pkl                     # Optimized encodings
 ├── face_encodings_backup.pkl              # Backup encodings
@@ -364,12 +370,10 @@ python launcher.py
     ├── improved_hybrid_recognition.py     # 🎯 Main system (RECOMMENDED)
     ├── face_learning_mode.py              # 📚 Interactive training
     ├── optimize_encodings.py              # ⚡ Performance optimizer
-    ├── launcher.py                        # 🚀 System launcher
-    ├── family_face_recognition.py         # 🎭 Original implementation
-    ├── face_detection.py                  # 🔍 YOLO detection only
-    ├── hybrid_face_recognition.py         # First hybrid attempt
     ├── README_SYSTEM_SUMMARY.py           # System overview
-    └── yolov11n-face.pt                   # YOLO model file
+    ├── yolov11n-face.pt                   # YOLO nano face model
+    ├── yolov8n-face.pt                    # YOLO v8 face model
+    └── yolov11s-face.pt                   # YOLO small face model
 ```
 
 ## 🎯 Best Practices
@@ -399,7 +403,7 @@ python launcher.py
 - **Daily Use**: `python improved_hybrid_recognition.py`
 - **Adding People**: `python face_learning_mode.py`
 - **Performance Issues**: `python optimize_encodings.py`
-- **System Management**: `python launcher.py`
+- **Quick Setup**: `./quick_start.sh` or `./setup.sh`
 
 ## 📞 Support
 
@@ -427,9 +431,6 @@ cd src && python face_learning_mode.py
 
 # ⚡ Speed optimization
 cd src && python optimize_encodings.py
-
-# 🚀 System menu
-cd src && python launcher.py
 ```
 
 ### Controls During Use
