@@ -12,7 +12,7 @@ _WORKSPACE_DIR = os.path.dirname(_SRC_DIR)
 
 # Data paths
 DATASET_PATH = os.path.join(_WORKSPACE_DIR, "family_images")
-MODEL_PATH = os.path.join(_SRC_DIR, "yolo", "yolov11n-face.pt")
+MODEL_PATH = os.path.join(_SRC_DIR, "yolo", "yolov11s-face.pt")
 ENCODINGS_DIR = os.path.join(_WORKSPACE_DIR, "model")
 
 # --- Recognition parameters ---

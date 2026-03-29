@@ -496,20 +496,22 @@ class InteractiveCLI:
         print("╚══════════════════════════════════════╝\n")
 
         while True:
+            model_name = Path(config.MODEL_PATH).name
             choice = questionary.select(
-                "Chọn hành động:",
+                f"Chọn hành động:  [model: {model_name}]",
                 choices=[
                     "1. Thu thập dữ liệu mới",
                     "2. Quản lý Persons (xem / xóa / reset)",
                     "3. Augment dataset",
-                    "4. Optimize encodings",
-                    "5. Cài đặt thu thập frame",
-                    "6. Thoát",
+                    "4. Rebuild encodings  (dùng model hiện tại)",
+                    "5. Optimize encodings  (cluster + giảm số lượng)",
+                    "6. Cài đặt thu thập frame",
+                    "7. Thoát",
                 ],
                 use_shortcuts=False,
             ).ask()
 
-            if choice is None or choice.startswith("6"):
+            if choice is None or choice.startswith("8"):
                 print("Tạm biệt!")
                 break
             elif choice.startswith("1"):
@@ -519,9 +521,13 @@ class InteractiveCLI:
             elif choice.startswith("3"):
                 self._augment_flow()
             elif choice.startswith("4"):
-                self._optimize_flow()
+                self._rebuild_flow()
             elif choice.startswith("5"):
+                self._optimize_flow()
+            elif choice.startswith("6"):
                 self._settings_flow()
+            elif choice.startswith("7"):
+                self._help_flow()
 
     # ------------------------------------------------------------------
     # Data collection flow
@@ -646,6 +652,42 @@ class InteractiveCLI:
     # ------------------------------------------------------------------
     # Augment flow
     # ------------------------------------------------------------------
+
+    def _rebuild_flow(self) -> None:
+        """Rebuild toàn bộ face encodings từ dataset dùng model hiện tại."""
+        print(f"\n--- Rebuild Encodings ---")
+        print(f"  Model   : {config.MODEL_PATH}")
+        print(f"  Dataset : {config.DATASET_PATH}")
+        encodings_path = os.path.join(config.ENCODINGS_DIR, "face_encodings_hybrid.pkl")
+        print(f"  Output  : {encodings_path}")
+
+        persons = self.person_mgr.list_persons()
+        if not persons:
+            print("  Không có person nào trong dataset.")
+            return
+
+        print(f"\n  Persons: {', '.join(p.name for p in persons)}")
+        total_images = sum(p.image_count + p.augmented_count for p in persons)
+        print(f"  Tổng ảnh (gốc + augmented): {total_images:,}\n")
+
+        confirmed = questionary.confirm(
+            f"Rebuild encodings cho {len(persons)} persons ({total_images:,} ảnh)?",
+            default=True,
+        ).ask()
+        if not confirmed:
+            return
+
+        import time
+        start = time.time()
+        print()
+        total_enc, total_persons = rebuild_encodings(
+            dataset_path=str(self.person_mgr.dataset_path),
+            model_path=config.MODEL_PATH,
+            encodings_path=encodings_path,
+            logger=logger,
+        )
+        elapsed = time.time() - start
+        print(f"\n  ✓ Xong — {total_enc} encodings | {total_persons} persons | {elapsed:.0f}s")
 
     def _augment_flow(self, person_name: Optional[str] = None) -> None:
         print("\n--- Augment Dataset ---")
@@ -903,6 +945,33 @@ class InteractiveCLI:
                 if val is not None:
                     s.frame_skip = int(val)
 
+    # ------------------------------------------------------------------
+    # Help
+    # ------------------------------------------------------------------
+
+    def _help_flow(self) -> None:
+        """Interactive help system."""
+        _HELP_TOPICS = {
+            "Tổng quan — Quy trình đầy đủ": _help_overview,
+            "1. Thu thập dữ liệu (camera / video)": _help_collect,
+            "2. Augment dataset": _help_augment,
+            "3. Rebuild encodings": _help_rebuild,
+            "4. Optimize encodings": _help_optimize,
+            "5. Cài đặt thu thập frame (tham số)": _help_settings,
+            "← Quay lại menu chính": None,
+        }
+        while True:
+            print()
+            topic = questionary.select(
+                "Hướng dẫn — chọn chủ đề:",
+                choices=list(_HELP_TOPICS.keys()),
+                use_shortcuts=False,
+            ).ask()
+            if topic is None or _HELP_TOPICS[topic] is None:
+                break
+            _HELP_TOPICS[topic]()
+            input("\n  [Enter để tiếp tục...]")
+
     @staticmethod
     def _show_collection_summary(result: CollectionResult) -> None:
         print(f"\n{'─' * 45}")
@@ -917,6 +986,231 @@ class InteractiveCLI:
             for reason, count in result.reject_reasons.items():
                 print(f"    {reason}: {count}")
         print(f"{'─' * 45}\n")
+
+
+# ---------------------------------------------------------------------------
+# Help text functions (called by _help_flow)
+# ---------------------------------------------------------------------------
+
+def _help_overview() -> None:
+    print("""
+╔══════════════════════════════════════════════════════════════╗
+║              QUY TRÌNH ĐẦY ĐỦ — NGƯỜI MỚI BẮT ĐẦU          ║
+╚══════════════════════════════════════════════════════════════╝
+
+Bước 1 — Thu thập ảnh khuôn mặt
+  Menu → "1. Thu thập dữ liệu mới"
+  ├── Chọn / tạo person (ví dụ: "Khai")
+  ├── Chọn nguồn: Camera hoặc Video file
+  └── Hệ thống tự động chọn frame đa dạng, chất lượng
+
+Bước 2 — (Tùy chọn) Augment để tăng dữ liệu
+  Menu → "3. Augment dataset"
+  Tạo thêm 8 biến thể cho mỗi ảnh gốc:
+  mờ nhẹ, mờ mạnh, tối nhẹ, tối nặng, nhiễu, v.v.
+  → Dùng khi có ÍT ảnh gốc (< 20 ảnh/người)
+
+Bước 3 — Rebuild encodings (huấn luyện lại)
+  Menu → "4. Rebuild encodings"
+  Đọc toàn bộ ảnh trong dataset → trích xuất vector khuôn mặt
+  → Bắt buộc sau khi thêm ảnh mới / đổi model YOLO
+
+Bước 4 — (Tùy chọn) Optimize để giảm số lượng
+  Menu → "5. Optimize encodings"
+  Gộp các encoding giống nhau → giữ tối đa 30/người
+  → Tăng tốc nhận diện khi có nhiều ảnh
+
+Bước 5 — Chạy nhận diện
+  python src/recognizer.py
+
+Lưu ý về model YOLO (config.py → MODEL_PATH):
+  yolov11n  → nhanh nhất (17 FPS), phát hiện tốt
+  yolov12s  → cân bằng (7 FPS), chính xác hơn
+  yolov12l  → chậm (2 FPS), dùng khi CPU mạnh / GPU
+""")
+
+
+def _help_collect() -> None:
+    print("""
+╔══════════════════════════════════════════════════════════════╗
+║              THU THẬP DỮ LIỆU — CAMERA / VIDEO              ║
+╚══════════════════════════════════════════════════════════════╝
+
+Hai chế độ:
+
+  [Camera]
+  • Mở webcam, thu thập real-time
+  • Hiển thị live preview: bbox, chất lượng, số frame đã lưu
+  • Nhấn Q để dừng sớm, ESC để hủy
+  • Khuyến nghị: target 30-50 frame/người
+
+  [Video file]
+  • Nhập đường dẫn file .mp4 / .avi / .mov / .mkv
+  • Hệ thống quét video, tự chọn frame đa dạng
+  • Không cần ngồi chờ — xử lý tự động
+
+Tiêu chí frame được lưu (tất cả phải đạt):
+  ✓ Phát hiện được khuôn mặt (YOLO confidence ≥ detect_conf)
+  ✓ Khuôn mặt đủ lớn (min_face_px)
+  ✓ Ảnh đủ nét (Laplacian variance ≥ min_laplacian)
+  ✓ Độ sáng hợp lệ (10% - 92% — không quá tối / quá sáng)
+  ✓ Đủ khác biệt với frame trước (SSIM < ssim_threshold)
+  ✓ Cách frame trước đủ xa (min_frame_gap)
+
+Lý do frame bị bỏ:
+  no_face      — YOLO không tìm thấy khuôn mặt
+  too_small    — khuôn mặt quá nhỏ (đứng xa camera)
+  blurry       — ảnh bị mờ / chuyển động nhanh
+  too_dark/bright — ánh sáng không phù hợp
+  duplicate    — frame quá giống frame vừa lưu
+
+Gợi ý quay video tốt:
+  • Ánh sáng đủ, không ngược sáng
+  • Quay nhiều góc: thẳng, nghiêng trái/phải, cúi/ngửa nhẹ
+  • Di chuyển chậm, tránh chuyển động nhanh
+  • Khoảng cách 50-200cm tới camera
+""")
+
+
+def _help_augment() -> None:
+    print("""
+╔══════════════════════════════════════════════════════════════╗
+║                    AUGMENT DATASET                           ║
+╚══════════════════════════════════════════════════════════════╝
+
+Augment tạo thêm biến thể từ ảnh gốc để mô hình nhận diện
+tốt hơn trong điều kiện thực tế khác với ảnh training.
+
+8 biến thể được tạo cho mỗi ảnh gốc:
+  1. blur_mild       — mờ nhẹ (nhân tạo điều kiện lens không nét)
+  2. blur_heavy      — mờ nặng (chuyển động mạnh)
+  3. motion_blur     — mờ chuyển động ngang
+  4. low_light_mild  — tối nhẹ (ánh sáng yếu)
+  5. low_light_heavy — tối nặng (ban đêm, bóng tối)
+  6. noise           — nhiễu ngẫu nhiên (camera chất lượng thấp)
+  7. low_quality     — JPEG compression artifact
+  8. combined        — kết hợp nhiều hiệu ứng cùng lúc
+
+Khi nào nên dùng:
+  ✓ Có ÍT ảnh gốc (< 20 ảnh/người)
+  ✓ Môi trường nhận diện có ánh sáng thay đổi
+  ✓ Muốn cải thiện độ chính xác mà không quay thêm video
+
+Khi KHÔNG nên dùng:
+  ✗ Đã có > 50 ảnh gốc/người (augment sẽ tạo quá nhiều file)
+  ✗ Sau khi augment, nhớ chạy "Rebuild encodings" để cập nhật
+
+File augment được đặt tên: <tên>_aug_<biến thể>.jpg
+PersonManager đếm riêng ảnh gốc và ảnh augment.
+""")
+
+
+def _help_rebuild() -> None:
+    print("""
+╔══════════════════════════════════════════════════════════════╗
+║                   REBUILD ENCODINGS                          ║
+╚══════════════════════════════════════════════════════════════╝
+
+Rebuild đọc lại toàn bộ ảnh trong dataset và tạo mới file
+face_encodings_hybrid.pkl — đây là file mà recognizer.py dùng
+để nhận diện khuôn mặt.
+
+Khi nào BẮT BUỘC phải rebuild:
+  ✓ Vừa thêm ảnh mới (thu thập / augment)
+  ✓ Vừa đổi model YOLO (ví dụ: yolov11n → yolov12s)
+  ✓ Vừa xóa / reset một person
+  ✓ File pkl bị lỗi hoặc mất
+
+Rebuild vs Optimize:
+  Rebuild  — tạo lại từ đầu, đọc toàn bộ ảnh (~chậm)
+  Optimize — gộp encoding giống nhau trong pkl đã có (~nhanh)
+  → Thứ tự đúng: Rebuild trước → Optimize sau (tùy chọn)
+
+Thời gian rebuild phụ thuộc vào:
+  • Số lượng ảnh trong dataset
+  • Model YOLO (n nhanh hơn l)
+  • Tốc độ CPU
+
+File output: model/face_encodings_hybrid.pkl
+File cũ được backup: model/face_encodings_hybrid_backup.pkl
+""")
+
+
+def _help_optimize() -> None:
+    print("""
+╔══════════════════════════════════════════════════════════════╗
+║                  OPTIMIZE ENCODINGS                          ║
+╚══════════════════════════════════════════════════════════════╝
+
+Optimize gộp các encoding quá giống nhau (clustering) và giữ
+tối đa MAX_ENCODINGS_PER_PERSON (mặc định 30) encoding/người.
+
+Tại sao cần optimize:
+  • Nhiều ảnh augment → hàng trăm encoding → nhận diện chậm
+  • Encoding trùng lặp không tăng độ chính xác
+  • Optimize giữ lại encoding đa dạng nhất
+
+Thuật toán:
+  1. Tính khoảng cách giữa tất cả encoding (pairwise distance)
+  2. Gộp encoding có distance < CLUSTERING_THRESHOLD (0.15)
+  3. Chọn encoding gần centroid nhất từ mỗi cụm
+  4. Nếu vẫn > 30: lấy đều từ dải chất lượng thấp → cao
+
+Kết quả điển hình:
+  Trước optimize: 200-400 encodings → Sau: 50-90 encodings
+  Tốc độ nhận diện tăng ~3-5x
+
+Khi nào chạy:
+  → Sau Rebuild, nếu nhận diện cảm thấy chậm
+  → Sau Augment + Rebuild (augment tạo rất nhiều encoding)
+
+Lưu ý: Optimize đọc từ pkl hiện có, không cần đọc lại ảnh.
+""")
+
+
+def _help_settings() -> None:
+    print("""
+╔══════════════════════════════════════════════════════════════╗
+║             CÀI ĐẶT THU THẬP FRAME — Ý NGHĨA THAM SỐ       ║
+╚══════════════════════════════════════════════════════════════╝
+
+min_laplacian  [mặc định: 15]
+  Độ nét tối thiểu (Laplacian variance).
+  Thấp hơn → chấp nhận ảnh mờ hơn.
+  Video mp4v nén: thường 6-43 (thấp hơn ảnh raw).
+  Tăng lên nếu muốn chỉ lấy ảnh thật sắc nét (> 30).
+
+min_face_px  [mặc định: 70]
+  Kích thước khuôn mặt tối thiểu (pixel — cạnh nhỏ hơn).
+  Thấp hơn → chấp nhận khuôn mặt nhỏ (đứng xa hơn).
+  Giảm về 50 nếu người hay đứng xa camera.
+
+detect_conf  [mặc định: 0.15]
+  Ngưỡng confidence tối thiểu của YOLO để nhận diện face.
+  Thấp hơn → bắt được khuôn mặt nghiêng / xa / mờ.
+  Tăng lên 0.4+ nếu gặp false detection (vật thể bị nhận là mặt).
+
+ssim_threshold  [mặc định: 0.85]
+  Ngưỡng similarity giữa frame mới và frame vừa lưu.
+  Cao hơn → khó bị bỏ qua (lưu nhiều frame giống nhau hơn).
+  Thấp hơn → khắt khe hơn về độ đa dạng.
+  Khoảng: 0.7 (rất đa dạng) — 0.95 (chấp nhận giống nhau nhiều)
+
+min_frame_gap  [mặc định: 10]
+  Số frame tối thiểu giữa 2 lần lưu liên tiếp.
+  Tăng lên nếu video nhiều frame giống nhau (video tĩnh).
+  Giảm xuống 3-5 nếu video ngắn mà muốn nhiều frame.
+
+frame_skip  [mặc định: 3]
+  Bỏ qua bao nhiêu frame trước khi xử lý 1 frame.
+  1 = xử lý mọi frame (chậm nhưng đầy đủ nhất).
+  5 = bỏ 4 frame, xử lý 1 (nhanh hơn 5x).
+
+Presets có sẵn:
+  Thoai mai — bắt nhiều frame, it reject nhất
+  Binh thuong — khuyến nghị (mặc định)
+  Khat khe — chỉ lấy frame chất lượng cao
+""")
 
 
 # ---------------------------------------------------------------------------
