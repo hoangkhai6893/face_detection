@@ -506,7 +506,8 @@ class InteractiveCLI:
                     "4. Rebuild encodings  (dùng model hiện tại)",
                     "5. Optimize encodings  (cluster + giảm số lượng)",
                     "6. Cài đặt thu thập frame",
-                    "7. Thoát",
+                    "7. Hướng dẫn",
+                    "8. Thoát",
                 ],
                 use_shortcuts=False,
             ).ask()

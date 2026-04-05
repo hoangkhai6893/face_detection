@@ -12,7 +12,7 @@ _WORKSPACE_DIR = os.path.dirname(_SRC_DIR)
 
 # Data paths
 DATASET_PATH = os.path.join(_WORKSPACE_DIR, "family_images")
-MODEL_PATH = os.path.join(_SRC_DIR, "yolo", "yolov11s-face.pt")
+MODEL_PATH = os.path.join(_SRC_DIR, "yolo", "yolov11n-face.pt")
 ENCODINGS_DIR = os.path.join(_WORKSPACE_DIR, "model")
 
 # --- Recognition parameters ---
@@ -60,3 +60,12 @@ FRAME_DETECT_CONF = 0.15       # Min YOLO confidence; lower catches non-frontal 
 # --- Camera / display ---
 FRAME_WIDTH = 1280
 FRAME_HEIGHT = 720
+
+# --- Real-time recognition performance ---
+# Re-run face_recognition encoding every N frames; reuse cached name otherwise.
+# Higher = faster, but name updates lag when a different person enters the bbox.
+# 5 is a good balance: ~166ms lag at 30fps, no visible flicker.
+RECOGNITION_INTERVAL = 5
+# Resize frame to this width before YOLO inference (YOLO's native size = 640).
+# Reduces preprocessing cost; bounding boxes are scaled back automatically.
+YOLO_INPUT_WIDTH = 640
