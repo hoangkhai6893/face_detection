@@ -12,7 +12,12 @@ _WORKSPACE_DIR = os.path.dirname(_SRC_DIR)
 
 # Data paths
 DATASET_PATH = os.path.join(_WORKSPACE_DIR, "family_images")
-MODEL_PATH = os.path.join(_SRC_DIR, "yolo", "yolov11n-face.pt")
+# Ưu tiên dùng ONNX Runtime (nhanh hơn PyTorch ~1.5-2x trên CPU).
+# Chạy `python src/export_onnx.py` để tạo file .onnx lần đầu.
+# Nếu chưa có .onnx, tự động fallback về .pt.
+_ONNX_MODEL = os.path.join(_SRC_DIR, "yolo", "yolov11n-face.onnx")
+_PT_MODEL   = os.path.join(_SRC_DIR, "yolo", "yolov11n-face.pt")
+MODEL_PATH  = _ONNX_MODEL if os.path.exists(_ONNX_MODEL) else _PT_MODEL
 ENCODINGS_DIR = os.path.join(_WORKSPACE_DIR, "model")
 
 # --- Recognition parameters ---
@@ -65,7 +70,8 @@ FRAME_HEIGHT = 720
 # Re-run face_recognition encoding every N frames; reuse cached name otherwise.
 # Higher = faster, but name updates lag when a different person enters the bbox.
 # 5 is a good balance: ~166ms lag at 30fps, no visible flicker.
-RECOGNITION_INTERVAL = 5
-# Resize frame to this width before YOLO inference (YOLO's native size = 640).
-# Reduces preprocessing cost; bounding boxes are scaled back automatically.
-YOLO_INPUT_WIDTH = 640
+RECOGNITION_INTERVAL = 10  # tăng từ 5→10: giảm 50% lần gọi dlib encoding (~0.6s lag tại 17FPS)
+# Resize frame to this width before YOLO inference.
+# 416 thay vì 640: nhanh hơn ~1.5-2x, giữ đủ độ phân giải cho khuôn mặt gần-trung bình.
+# Nếu bạn cần nhận diện khuôn mặt ở rất xa, đổi lại 640.
+YOLO_INPUT_WIDTH = 416

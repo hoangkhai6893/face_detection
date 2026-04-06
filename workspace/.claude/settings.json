@@ -24,7 +24,9 @@
       "Bash(python -c \"import sys; sys.path.insert\\(0, ''src''\\); import config; print\\(''MODEL_PATH:'', config.MODEL_PATH\\)\")",
       "Bash(find /home/dkhai/workspace -name *.pyc -delete)",
       "Bash(xargs ls:*)",
-      "Bash(ls -lh /home/dkhai/workspace/*.pkl)"
+      "Bash(ls -lh /home/dkhai/workspace/*.pkl)",
+      "Bash(python3 -c \"import sys; sys.path.insert\\(0, '/home/dkhai/workspace/src'\\); import config; print\\('Config loaded successfully'\\)\")",
+      "Bash(grep -n \"TODO\\\\|FIXME\\\\|XXX\\\\|HACK\\\\|PERF\\\\|slow\\\\|bottleneck\" /home/dkhai/workspace/src/*.py /home/dkhai/workspace/src/core/*.py)"
     ]
   }
 }
