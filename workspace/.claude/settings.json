@@ -26,7 +26,25 @@
       "Bash(xargs ls:*)",
       "Bash(ls -lh /home/dkhai/workspace/*.pkl)",
       "Bash(python3 -c \"import sys; sys.path.insert\\(0, '/home/dkhai/workspace/src'\\); import config; print\\('Config loaded successfully'\\)\")",
-      "Bash(grep -n \"TODO\\\\|FIXME\\\\|XXX\\\\|HACK\\\\|PERF\\\\|slow\\\\|bottleneck\" /home/dkhai/workspace/src/*.py /home/dkhai/workspace/src/core/*.py)"
+      "Bash(grep -n \"TODO\\\\|FIXME\\\\|XXX\\\\|HACK\\\\|PERF\\\\|slow\\\\|bottleneck\" /home/dkhai/workspace/src/*.py /home/dkhai/workspace/src/core/*.py)",
+      "Bash(python3 -c \"import cv2, numpy; print\\('cv2 OK, numpy OK'\\)\")",
+      "Bash(python3 -c \"import face_recognition; print\\('face_recognition OK'\\)\")",
+      "Bash(python3 -c \"import ultralytics; print\\('ultralytics OK'\\)\")",
+      "Bash(python3 -c \"import onnxruntime; print\\('onnxruntime OK'\\)\")",
+      "Bash(python3 -c \"import questionary; print\\('questionary OK'\\)\")",
+      "Bash(ls ~/.local/lib/ 2>/dev/null || true; ls /usr/lib/python3/ 2>/dev/null | head -20; find /usr -name \"face_recognition*\" 2>/dev/null | head -5; find /usr -name \"ultralytics*\" 2>/dev/null | head -5)",
+      "Read(//home/dkhai/.local/lib/**)",
+      "Bash(python3.11 --version)",
+      "Bash(python3.11 -c \"import ultralytics; print\\('ultralytics OK'\\)\")",
+      "Bash(python3.11 -c \"import face_recognition; print\\('face_recognition OK'\\)\")",
+      "Bash(python3.11 -c \"import onnxruntime; print\\('onnxruntime OK'\\)\")",
+      "Bash(python3.11 -c \"import cv2; print\\('cv2 OK'\\)\")",
+      "Bash(python3.11 -c \"import questionary; print\\('questionary OK'\\)\")",
+      "Bash(python3.11 -c \"import pytest; print\\('pytest OK'\\)\")",
+      "Bash(python3.11 -c \"import sklearn; print\\('sklearn OK'\\)\")",
+      "Bash(python3.11 -c \"import skimage; print\\('skimage OK'\\)\")",
+      "Bash(python3.11 -m pytest tests/ -v)",
+      "Bash(python3.11 -c ' *)"
     ]
   }
 }
