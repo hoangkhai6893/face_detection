@@ -31,6 +31,7 @@ from alert_manager import AlertManager
 from event_logger import EventLogger
 from device_dispatcher import DeviceDispatcher
 from core.recognition_stabilizer import RecognitionStabilizer
+from notification_worker import NotificationWorker
 
 
 def parse_args() -> argparse.Namespace:
@@ -125,27 +126,26 @@ def main() -> None:
         args.stabilizer_window, args.min_known, args.min_unknown,
     )
 
+    # NotificationWorker: xử lý Telegram / MQTT / disk I/O trên background thread
+    # → camera loop không bao giờ bị block bởi network/disk
+    worker = NotificationWorker(
+        alert_manager=alert_manager,
+        event_logger=event_logger,
+        dispatcher=dispatcher,
+        logger=logger,
+    )
+
     # Frame counter shared with callback (closure)
     frame_state = {"count": 0}
 
     def on_recognition_update(raw_name: str, bbox: tuple, frame: np.ndarray) -> None:
         frame_state["count"] += 1
+        # stabilizer.update() chạy đồng bộ: chỉ RAM ops, < 0.1ms
         event = stabilizer.update(raw_name, bbox, frame_state["count"], frame)
-        if event is None:
-            return  # chưa đủ votes → chờ thêm
-
-        if event.is_known:
-            logger.info("STABLE KNOWN: %s (conf=%.2f)", event.person_name, event.confidence or 0)
-            if event_logger:
-                event_logger.log(event.person_name, event.bbox, event.confidence)
-            if dispatcher:
-                dispatcher.dispatch(event.person_name, event.confidence)
-        else:
-            logger.warning("STABLE UNKNOWN: người lạ phát hiện tại bbox=%s", event.bbox)
-            if alert_manager:
-                alert_manager.trigger(event.frame, event.bbox)
-            if event_logger:
-                event_logger.log("Unknown", event.bbox, confidence=None)
+        if event is not None:
+            # Đẩy vào queue — non-blocking (< 1ms)
+            # I/O thực sự (Telegram, MQTT, disk) chạy trên NotificationWorker thread
+            worker.submit(event)
 
     # --- Build FaceRecognizer with callback ---
     try:
@@ -174,6 +174,7 @@ def main() -> None:
             frame_height=args.height,
         )
     finally:
+        worker.shutdown()
         if dispatcher:
             dispatcher.shutdown()
         logger.info("Smart home system stopped.")

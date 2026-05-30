@@ -10,9 +10,9 @@
             ]
         }
     },
-    "workspaceFolder": "/home/dkhai/workspace",
+    "workspaceFolder": "/home/ubuntu/workspace",
     "shutdownAction": "stopCompose",
-    "remoteUser": "dkhai",
+    "remoteUser": "ubuntu",
     "remoteEnv": {
         "USER_ID": "1000"
     }

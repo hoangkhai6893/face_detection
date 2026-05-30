@@ -1,10 +1,10 @@
-#!/usr/bin/env python3.11
+#!/usr/bin/env python3
 """
 Smoke driver for the Family Face Recognition System.
 
 Exercises core library modules without a camera or GUI.
 Run from the workspace root:
-    python3.11 .claude/skills/run-workspace/driver.py
+    python3 .claude/skills/run-workspace/driver.py
 
 Exit 0 = all checks passed.
 """

@@ -41,7 +41,7 @@ _SRC = Path(__file__).parent
 sys.path.insert(0, str(_SRC))
 
 import config
-from core.encoder import rebuild_encodings
+from core.encoder import rebuild_encodings, update_person_encodings
 from core.frame_extractor import (
     ExtractedFrame,
     FrameDiversityFilter,
@@ -308,6 +308,7 @@ class DataCollectionSession:
         self.extractor = extractor
         self.person_folder = Path(dataset_path) / person_name
         self.person_folder.mkdir(parents=True, exist_ok=True)
+        self._saved_frame_paths: List[str] = []  # track new files for incremental update
 
     # ------------------------------------------------------------------
     # Public
@@ -453,20 +454,21 @@ class DataCollectionSession:
         filename = f"{self.person_name}_{timestamp_ms}_q{ef.quality_score:.2f}.jpg"
         dest = self.person_folder / filename
         cv2.imwrite(str(dest), ef.face_crop)
+        self._saved_frame_paths.append(str(dest))
         return str(dest)
 
     def _rebuild_encodings(self) -> None:
         encodings_path = os.path.join(config.ENCODINGS_DIR, "face_encodings_hybrid.pkl")
-        logger.info("Rebuilding encodings → %s", encodings_path)
-        total_enc, total_persons = rebuild_encodings(
-            dataset_path=str(self.person_folder.parent),
-            model_path=config.MODEL_PATH,
+        new_added, total = update_person_encodings(
+            person_name=self.person_name,
+            new_image_paths=self._saved_frame_paths,
             encodings_path=encodings_path,
+            model_path=config.MODEL_PATH,
             logger=logger,
         )
         logger.info(
-            "Encodings rebuilt — %d encodings for %d persons",
-            total_enc, total_persons,
+            "Incremental update done: +%d new encodings → %d total for '%s'",
+            new_added, total, self.person_name,
         )
 
 

@@ -21,12 +21,21 @@ MODEL_PATH  = _ONNX_MODEL if os.path.exists(_ONNX_MODEL) else _PT_MODEL
 ENCODINGS_DIR = os.path.join(_WORKSPACE_DIR, "model")
 
 # --- Recognition parameters ---
-TOLERANCE = 0.6              # Face matching tolerance (lower = stricter)
+TOLERANCE = 0.5              # Face matching tolerance (lower = stricter)
 DETECTION_CONFIDENCE = 0.3   # Min YOLO confidence for live detection (low = catches distant faces)
 ENCODING_CONFIDENCE = 0.5    # Min YOLO confidence when building encodings from dataset
 RECOGNITION_PADDING = 15     # Pixel padding around detected face for recognition
 ENCODING_PADDING = 20        # Pixel padding around detected face when encoding training images
 MAX_FPS_SAMPLES = 30         # Rolling window size for FPS calculation
+# Top-K voting: lấy K encoding gần nhất rồi vote theo tên người.
+# Tránh trường hợp 1 encoding xấu trong DB kéo kết quả sai.
+# K=1 = hành vi cũ (argmin thuần). K=5 khuyến nghị sau khi optimize (30 enc/người).
+RECOGNITION_TOP_K = 5
+# Nếu runner-up (người thứ 2) cách winner < margin này → trả Unknown thay vì đoán sai.
+# Quan trọng khi có người thân/bạn bè cùng hộ — embedding gần nhau hơn người lạ.
+CONFUSION_MARGIN = 0.10
+# IOU threshold để xác định 2 bbox là cùng 1 khuôn mặt (cache lookup + update)
+IOU_CACHE_THRESHOLD = 0.4
 
 # --- Learning / training parameters ---
 # Detection threshold: how confident YOLO must be before a face region is processed.
@@ -127,3 +136,10 @@ MOTION_MOG2_THRESHOLD = 5
 # Idle fallback: nếu YOLO không chạy quá N giây, force-run dù không có motion.
 #   Đảm bảo người đứng yên lâu không bị MOG2 "nuốt" vào background.
 MOTION_MAX_IDLE_SEC = 10
+
+# --- State machine IDLE/ACTIVE (MotionGuard) ---
+# IDLE: chỉ check motion mỗi N frame → ~5fps tại camera 30fps (~2% CPU)
+IDLE_SAMPLE_EVERY = 6
+# ACTIVE → IDLE: sau bao nhiêu frame liên tiếp YOLO không thấy mặt nào
+# 150 frames ≈ 5 giây tại 30fps
+IDLE_NO_FACE_FRAMES = 150

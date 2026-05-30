@@ -18,24 +18,25 @@ services:
       - seccomp:unconfined
     # shm_size: '300gb'
 
-    environment:  
+    environment:
       DISPLAY: ${DISPLAY}
       CCACHE_DIR: ccache
-      QT_X11_NO_MITSHM: 1 
+      QT_X11_NO_MITSHM: 1
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
       #xhost +local:docker
 
     volumes:
-      - ${HOME}/.Xauthority:/home/dkhai/.Xauthority:rw
-      - ./workspace:/home/dkhai/workspace:rw
+      - ${HOME}/.Xauthority:/home/ubuntu/.Xauthority:rw
+      - ./workspace:/home/ubuntu/workspace:rw
       - /tmp/.X11-unix:/tmp/.X11-unix  # Enable GUI display
       - /dev:/dev:rw
       - /dev/shm:/dev/shm:rw
       - /etc/localtime:/etc/localtime:ro
       - /var/run/dbus:/var/run/dbus:rw
+      - ${HOME}/.claude:/home/ubuntu/.claude:rw
+      - ${HOME}/.npm:/home/ubuntu/.npm:rw
 
       
-      
-
     tty: "true"
     ulimits:
       memlock: -1
@@ -47,7 +48,7 @@ services:
       args:
         - USER_ID=1000
         - GROUP_ID=1000
-        - USER_NAME=dkhai
+        - USER_NAME=ubuntu
       x-bake:
         tags:
           - face_detection:v2.0
