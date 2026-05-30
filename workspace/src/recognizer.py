@@ -13,7 +13,7 @@ import queue
 import sys
 import threading
 from collections import deque
-from typing import List, Tuple, Optional
+from typing import Callable, List, Tuple, Optional
 
 import cv2
 import face_recognition
@@ -51,7 +51,8 @@ class FaceRecognizer:
         encodings_file: Optional[str] = None,
         recognition_interval: int = config.RECOGNITION_INTERVAL,
         yolo_input_width: int = config.YOLO_INPUT_WIDTH,
-        logger: Optional[logging.Logger] = None
+        logger: Optional[logging.Logger] = None,
+        on_recognition_update: Optional[Callable[[str, tuple, "np.ndarray"], None]] = None,
     ):
         """
         Initialize the face recognizer.
@@ -80,6 +81,7 @@ class FaceRecognizer:
         self.recognition_interval = recognition_interval
         self.yolo_input_width = yolo_input_width
         self.logger = logger or logging.getLogger(__name__)
+        self.on_recognition_update = on_recognition_update
 
         self._validate_paths()
 
@@ -458,6 +460,13 @@ class FaceRecognizer:
                         name = self.recognize_face_in_region(rgb_frame, x1, y1, x2, y2)
                         self._update_cache(bbox, name)
                         recognition_results.append(name)
+                        # Fire raw callback BEFORE draw_results() modifies frame in-place.
+                        # frame.copy() ensures the snapshot is clean (no bounding boxes).
+                        if self.on_recognition_update is not None:
+                            try:
+                                self.on_recognition_update(name, bbox, frame.copy())
+                            except Exception as _cb_err:
+                                self.logger.debug("on_recognition_update error: %s", _cb_err)
 
                 if face_detections and recognition_results:
                     frame = self.draw_results(frame, face_detections, recognition_results)

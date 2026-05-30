@@ -75,3 +75,41 @@ RECOGNITION_INTERVAL = 10  # tăng từ 5→10: giảm 50% lần gọi dlib enco
 # 416 thay vì 640: nhanh hơn ~1.5-2x, giữ đủ độ phân giải cho khuôn mặt gần-trung bình.
 # Nếu bạn cần nhận diện khuôn mặt ở rất xa, đổi lại 640.
 YOLO_INPUT_WIDTH = 416
+
+# =============================================================================
+# --- Smart Home Security Extension ---
+# =============================================================================
+
+# RecognitionStabilizer — chống nhiễu nhận diện
+# Mỗi cache-miss (~mỗi RECOGNITION_INTERVAL frames) tính là 1 "vote".
+# Known person cần ít vote hơn để bật đèn nhanh; Unknown cần nhiều hơn để tránh báo nhầm.
+STABILIZER_WINDOW = 5            # Theo dõi N cache-miss gần nhất per face
+STABILIZER_MIN_KNOWN = 2         # ≥ 2/5 votes → confirm known person (~1s tại 20fps)
+STABILIZER_MIN_UNKNOWN = 4       # ≥ 4/5 votes → confirm Unknown (~4s, tránh báo nhầm)
+STABILIZER_TRACK_TIMEOUT = 60    # Xóa face track nếu mất > 60 frames (~3s)
+
+# Alert — cảnh báo người lạ
+ALERT_COOLDOWN_SECONDS = 30.0    # Thời gian chờ tối thiểu giữa hai lần alert (tránh spam)
+ALERT_SNAPSHOT_DIR = os.path.join(_WORKSPACE_DIR, "alerts")  # Thư mục lưu ảnh người lạ
+ALERT_ENABLE_SOUND = True        # Phát tiếng beep hệ thống khi có người lạ
+
+# Entry log — lịch sử vào nhà
+ENTRY_LOG_PATH = os.path.join(_WORKSPACE_DIR, "logs", "entry_log.jsonl")
+
+# Device dispatch — kích hoạt thiết bị khi nhận diện thành viên
+DISPATCH_COOLDOWN_SECONDS = 10.0  # Không dispatch lại cùng người trong vòng N giây
+
+# MQTT broker (dùng env vars — không hardcode credentials vào code)
+MQTT_HOST = os.environ.get("MQTT_HOST", "localhost")
+MQTT_PORT = int(os.environ.get("MQTT_PORT", "1883"))
+MQTT_TOPIC_PREFIX = os.environ.get("MQTT_TOPIC_PREFIX", "home/faces")
+MQTT_USERNAME = os.environ.get("MQTT_USERNAME", None)
+MQTT_PASSWORD = os.environ.get("MQTT_PASSWORD", None)
+
+# Telegram Bot (optional — để trống nếu không dùng)
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", None)
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", None)
+
+# Serial / Arduino (optional)
+SERIAL_PORT = os.environ.get("SERIAL_PORT", "/dev/ttyUSB0")
+SERIAL_BAUD_RATE = int(os.environ.get("SERIAL_BAUD_RATE", "9600"))
