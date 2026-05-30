@@ -51,6 +51,9 @@ class FaceRecognizer:
         encodings_file: Optional[str] = None,
         recognition_interval: int = config.RECOGNITION_INTERVAL,
         yolo_input_width: int = config.YOLO_INPUT_WIDTH,
+        motion_absdiff_threshold: float = config.MOTION_ABSDIFF_THRESHOLD,
+        motion_mog2_threshold: float = config.MOTION_MOG2_THRESHOLD,
+        motion_max_idle_sec: float = config.MOTION_MAX_IDLE_SEC,
         logger: Optional[logging.Logger] = None
     ):
         """
@@ -79,6 +82,13 @@ class FaceRecognizer:
         self.encoding_padding = encoding_padding
         self.recognition_interval = recognition_interval
         self.yolo_input_width = yolo_input_width
+        self.motion_absdiff_threshold = motion_absdiff_threshold
+        self.motion_mog2_threshold    = motion_mog2_threshold
+        self.motion_max_idle_sec      = motion_max_idle_sec
+        # MOG2: học background qua 500 frames (~33s ở 15fps), bỏ shadow detection để nhẹ hơn
+        self._mog2 = cv2.createBackgroundSubtractorMOG2(
+            history=500, varThreshold=16, detectShadows=False
+        )
         self.logger = logger or logging.getLogger(__name__)
 
         self._validate_paths()
@@ -413,6 +423,12 @@ class FaceRecognizer:
         if self.yolo_input_width and self.yolo_input_width < frame_width:
             yolo_scale = self.yolo_input_width / frame_width
 
+        # Motion gate state
+        _prev_gray:               Optional[np.ndarray]               = None
+        _last_face_detections:    List[Tuple[int, int, int, int, float]] = []
+        _last_recognition_results: List[str]                          = []
+        _last_yolo_time:          float                               = time.time()
+
         try:
             while True:
                 start_time = time.time()
@@ -424,40 +440,70 @@ class FaceRecognizer:
 
                 self._frame_count += 1
 
-                # --- YOLO detection on a downscaled frame ---
-                if yolo_scale < 1.0:
-                    small_h = int(frame_height * yolo_scale)
-                    small_frame = cv2.resize(frame, (self.yolo_input_width, small_h))
-                    small_detections = self.detect_faces_yolo(small_frame)
-                    inv = 1.0 / yolo_scale
-                    face_detections = [
-                        (int(x1 * inv), int(y1 * inv), int(x2 * inv), int(y2 * inv), c)
-                        for x1, y1, x2, y2, c in small_detections
-                    ]
+                # --- Motion gate (~0.6ms): quyết định có chạy YOLO không ---
+                _motion_small = cv2.resize(frame, (160, 90))
+                _curr_gray    = cv2.cvtColor(_motion_small, cv2.COLOR_BGR2GRAY)
+
+                # absdiff: kiểm tra nhanh "có gì thay đổi không?" (~0.1ms)
+                if _prev_gray is not None:
+                    _absdiff_score = float(cv2.absdiff(_prev_gray, _curr_gray).mean())
                 else:
-                    face_detections = self.detect_faces_yolo(frame)
+                    _absdiff_score = 255.0  # frame đầu tiên: luôn xử lý
+                _prev_gray = _curr_gray
 
-                # Convert BGR→RGB once per frame (not once per face)
-                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                _idle_too_long = (time.time() - _last_yolo_time) > self.motion_max_idle_sec
 
-                # Prune stale cache entries
-                self._face_cache = [
-                    e for e in self._face_cache
-                    if self._frame_count - e['frame'] <= self.recognition_interval * 2
-                ]
+                if _absdiff_score >= self.motion_absdiff_threshold or _idle_too_long:
+                    # MOG2: xác nhận người thật hay chỉ thay đổi ánh sáng (~0.5ms)
+                    _mog2_mask  = self._mog2.apply(_curr_gray)
+                    _mog2_score = float(_mog2_mask.mean()) / 2.55  # normalize 0–100
+                    _should_run = _mog2_score >= self.motion_mog2_threshold or _idle_too_long
+                else:
+                    _should_run = False
 
-                recognition_results = []
-                for x1, y1, x2, y2, conf in face_detections:
-                    bbox = (x1, y1, x2, y2)
-                    cached = self._get_cached_name(bbox)
-                    if cached is not None:
-                        # Face was recognized recently — reuse result
-                        recognition_results.append(cached)
+                if _should_run:
+                    # --- YOLO detection on a downscaled frame ---
+                    if yolo_scale < 1.0:
+                        small_h = int(frame_height * yolo_scale)
+                        small_frame = cv2.resize(frame, (self.yolo_input_width, small_h))
+                        small_detections = self.detect_faces_yolo(small_frame)
+                        inv = 1.0 / yolo_scale
+                        face_detections = [
+                            (int(x1 * inv), int(y1 * inv), int(x2 * inv), int(y2 * inv), c)
+                            for x1, y1, x2, y2, c in small_detections
+                        ]
                     else:
-                        # New face or cache expired — run full recognition
-                        name = self.recognize_face_in_region(rgb_frame, x1, y1, x2, y2)
-                        self._update_cache(bbox, name)
-                        recognition_results.append(name)
+                        face_detections = self.detect_faces_yolo(frame)
+
+                    # Convert BGR→RGB once per active frame (not once per face)
+                    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+                    # Prune stale cache entries
+                    self._face_cache = [
+                        e for e in self._face_cache
+                        if self._frame_count - e['frame'] <= self.recognition_interval * 2
+                    ]
+
+                    recognition_results = []
+                    for x1, y1, x2, y2, conf in face_detections:
+                        bbox = (x1, y1, x2, y2)
+                        cached = self._get_cached_name(bbox)
+                        if cached is not None:
+                            # Face was recognized recently — reuse result
+                            recognition_results.append(cached)
+                        else:
+                            # New face or cache expired — run full recognition
+                            name = self.recognize_face_in_region(rgb_frame, x1, y1, x2, y2)
+                            self._update_cache(bbox, name)
+                            recognition_results.append(name)
+
+                    _last_yolo_time          = time.time()
+                    _last_face_detections    = face_detections
+                    _last_recognition_results = recognition_results
+                else:
+                    # Static scene: tái dùng toàn bộ kết quả cũ — không chạy YOLO, BGR→RGB, hay dlib
+                    face_detections    = _last_face_detections
+                    recognition_results = _last_recognition_results
 
                 if face_detections and recognition_results:
                     frame = self.draw_results(frame, face_detections, recognition_results)
@@ -468,8 +514,9 @@ class FaceRecognizer:
                 avg_time = np.mean(self.detection_times)
                 fps = 1.0 / avg_time if avg_time > 0 else 0
 
+                _indicator = "M" if _should_run else "-"
                 info_text = [
-                    f"FPS: {fps:.1f}",
+                    f"FPS: {fps:.1f} [{_indicator}]",
                     f"Faces: {len(face_detections)}",
                     f"Known: {self._unique_person_count} people",
                     f"Encodings: {len(self.known_face_encodings)}"
@@ -588,6 +635,27 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument(
+        '--motion-absdiff',
+        type=float,
+        default=config.MOTION_ABSDIFF_THRESHOLD,
+        help='Ngưỡng absdiff phát hiện chuyển động (thấp=nhạy hơn, 0=tắt gate)'
+    )
+
+    parser.add_argument(
+        '--motion-mog2',
+        type=float,
+        default=config.MOTION_MOG2_THRESHOLD,
+        help='Ngưỡng %% pixels MOG2 xác nhận motion thật (thấp=nhạy hơn)'
+    )
+
+    parser.add_argument(
+        '--motion-idle',
+        type=float,
+        default=config.MOTION_MAX_IDLE_SEC,
+        help='Giây tối đa không chạy YOLO trước khi force-run (fallback người đứng yên)'
+    )
+
+    parser.add_argument(
         '--verbose', '-v',
         action='store_true',
         help='Enable verbose logging'
@@ -612,6 +680,9 @@ def main():
             encodings_file=args.encodings_file,
             recognition_interval=args.recognition_interval,
             yolo_input_width=args.yolo_input_width,
+            motion_absdiff_threshold=args.motion_absdiff,
+            motion_mog2_threshold=args.motion_mog2,
+            motion_max_idle_sec=args.motion_idle,
             logger=logger
         )
 

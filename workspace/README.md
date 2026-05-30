@@ -102,7 +102,7 @@ Hệ thống nhận diện khuôn mặt gia đình kết hợp YOLO (face detect
 ### Pipeline nhận diện real-time (chi tiết)
 
 ```
-Camera (1280×720)
+Camera (1280×720)`
     │
     ▼ [Capture Thread]
 Frame Queue (maxsize=1) — luôn lấy frame mới nhất

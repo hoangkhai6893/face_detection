@@ -75,3 +75,17 @@ RECOGNITION_INTERVAL = 10  # tăng từ 5→10: giảm 50% lần gọi dlib enco
 # 416 thay vì 640: nhanh hơn ~1.5-2x, giữ đủ độ phân giải cho khuôn mặt gần-trung bình.
 # Nếu bạn cần nhận diện khuôn mặt ở rất xa, đổi lại 640.
 YOLO_INPUT_WIDTH = 416
+
+# --- Motion gate (CPU optimization for 24/7 operation) ---
+# Kết hợp absdiff + MOG2 để quyết định có chạy YOLO hay không.
+# Tất cả tính trên ảnh grayscale 160×90 (~0.6ms tổng) thay vì chạy YOLO mọi frame (~50-200ms).
+#
+# absdiff: mean pixel diff (0–255) giữa frame hiện tại và frame trước.
+#   < threshold → không có gì thay đổi → skip YOLO ngay lập tức.
+MOTION_ABSDIFF_THRESHOLD = 8
+# MOG2: % pixels được đánh dấu foreground (0–100) sau khi absdiff trigger.
+#   < threshold → chỉ là thay đổi ánh sáng, không phải người → skip YOLO.
+MOTION_MOG2_THRESHOLD = 5
+# Idle fallback: nếu YOLO không chạy quá N giây, force-run dù không có motion.
+#   Đảm bảo người đứng yên lâu không bị MOG2 "nuốt" vào background.
+MOTION_MAX_IDLE_SEC = 10
