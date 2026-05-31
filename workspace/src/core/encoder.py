@@ -17,7 +17,6 @@ import numpy as np
 from ultralytics import YOLO
 
 import config
-from core.face_utils import extract_face_region
 
 
 def _extract_face_encoding(
@@ -27,7 +26,8 @@ def _extract_face_encoding(
 ) -> Optional[np.ndarray]:
     """
     Extract a 128-d face encoding from *image* using YOLO + face_recognition.
-    Falls back to pure face_recognition if YOLO finds nothing confident enough.
+    Passes YOLO bbox directly as known_face_locations — skips redundant HOG step,
+    consistent with recognizer.py. Falls back to full-image scan if YOLO misses.
     """
     results = yolo_model(image, verbose=False)
 
@@ -43,17 +43,19 @@ def _extract_face_encoding(
             continue
 
         x1, y1, x2, y2 = map(int, best_box.xyxy[0].cpu().numpy())
-        face_image = extract_face_region(image, x1, y1, x2, y2, config.ENCODING_PADDING)
-        if face_image is None:
-            continue
+        h, w = image.shape[:2]
+        top    = max(0, y1 - config.ENCODING_PADDING)
+        right  = min(w, x2 + config.ENCODING_PADDING)
+        bottom = min(h, y2 + config.ENCODING_PADDING)
+        left   = max(0, x1 - config.ENCODING_PADDING)
 
         try:
-            rgb = cv2.cvtColor(face_image, cv2.COLOR_BGR2RGB)
-            locations = face_recognition.face_locations(rgb, model="hog")
-            if locations:
-                encodings = face_recognition.face_encodings(rgb, locations)
-                if encodings:
-                    return encodings[0]
+            rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            encodings = face_recognition.face_encodings(
+                rgb, known_face_locations=[(top, right, bottom, left)]
+            )
+            if encodings:
+                return encodings[0]
         except Exception:
             pass
 
@@ -247,18 +249,23 @@ def rebuild_encodings(
         if not image_files:
             continue
 
-        ok = 0
+        person_encs: List[np.ndarray] = []
         for fname in image_files:
             img = cv2.imread(os.path.join(person_folder, fname))
             if img is None:
                 continue
             enc = _extract_face_encoding(img, yolo_model, logger)
             if enc is not None:
-                all_encodings.append(enc)
-                all_names.append(person_name)
-                ok += 1
+                person_encs.append(enc)
 
-        logger.info("  %s: %d / %d images encoded", person_name, ok, len(image_files))
+        clustered = _cluster_to_max(person_encs, config.MAX_ENCODINGS_PER_PERSON)
+        all_encodings.extend(clustered)
+        all_names.extend([person_name] * len(clustered))
+
+        logger.info(
+            "  %s: %d / %d images → %d encodings after clustering",
+            person_name, len(person_encs), len(image_files), len(clustered),
+        )
         persons_processed += 1
 
     # Backup existing encodings before overwriting

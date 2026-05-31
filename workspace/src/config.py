@@ -6,6 +6,12 @@ All paths are resolved relative to this file's location — no hardcoded absolut
 
 import os
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"))
+except ImportError:
+    pass  # python-dotenv chưa cài — dùng env vars từ shell
+
 # --- Directory layout ---
 _SRC_DIR = os.path.dirname(os.path.abspath(__file__))
 _WORKSPACE_DIR = os.path.dirname(_SRC_DIR)
@@ -57,10 +63,10 @@ HIGH_CONFIDENCE_THRESHOLD = 0.35
 # Minimum quality score to keep an encoding.
 # Lowered from 0.6 → 0.15 so adverse-condition images (dark, blurry) pass through.
 OPTIMIZE_QUALITY_THRESHOLD = 0.15
-MAX_ENCODINGS_PER_PERSON = 30      # Max encodings kept per person after clustering (was 20)
-CLUSTERING_THRESHOLD = 0.15        # Face distance below which two encodings are near-duplicates (was 0.4 → 0.5)
-                                   # Typical same-person distances: 0.2-0.5, so 0.15 only deduplicates
-                                   # near-identical shots without collapsing different-condition images.
+MAX_ENCODINGS_PER_PERSON = 50      # Max encodings kept per person after clustering (tăng từ 30 → 50 để bao phủ nhiều góc/ánh sáng hơn)
+CLUSTERING_THRESHOLD = 0.25        # Face distance below which two encodings are near-duplicates
+                                   # Tăng từ 0.15 → 0.25: distance 0.15 quá chặt, loại bỏ ảnh cùng người ở điều kiện khác nhau.
+                                   # 0.25 chỉ dedup ảnh thực sự trùng, giữ lại đa dạng góc/ánh sáng.
 FACE_AREA_NORMALIZATION = 5000     # Divisor when converting face area to a 0-1 quality score (was 10000)
 OPTIMIZE_PADDING = 20              # Pixel padding during face extraction in optimizer
 

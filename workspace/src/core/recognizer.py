@@ -355,8 +355,8 @@ class FaceRecognizer:
                     face_encoding
                 )
 
-                # Top-K voting: lấy K encoding gần nhất trong ngưỡng tolerance,
-                # đếm vote theo tên người → tránh bị kéo bởi 1 encoding xấu trong DB.
+                # Top-K weighted voting: lấy K encoding gần nhất trong ngưỡng tolerance,
+                # weight = (1 - distance) để encoding gần hơn có ảnh hưởng lớn hơn.
                 k = min(self.recognition_top_k, len(distances))
                 top_k_idx = np.argsort(distances)[:k]
 
@@ -364,13 +364,11 @@ class FaceRecognizer:
                 for idx in top_k_idx:
                     if distances[idx] <= self.tolerance:
                         person = self.known_face_names[idx]
-                        votes[person] = votes.get(person, 0) + 1
+                        weight = 1.0 - distances[idx]
+                        votes[person] = votes.get(person, 0.0) + weight
 
                 if votes:
-                    # Người có nhiều vote nhất thắng; nếu hoà → lấy người có distance nhỏ nhất
-                    winner = max(votes, key=lambda p: (votes[p], -distances[
-                        next(i for i in top_k_idx if self.known_face_names[i] == p)
-                    ]))
+                    winner = max(votes, key=lambda p: votes[p])
                     best_dist = min(
                         distances[i] for i in top_k_idx
                         if self.known_face_names[i] == winner

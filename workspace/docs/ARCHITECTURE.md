@@ -1,6 +1,6 @@
 # Kiến Trúc Hệ Thống — Family Face Recognition
 
-**Phiên bản:** 4.0
+**Phiên bản:** 4.1
 **Ngày cập nhật:** 2026-05-31
 
 ---
@@ -183,14 +183,15 @@ Camera Frame (1280×720)
 ┌───────────────────────┐
 │   face_recognition    │  Dùng YOLO bbox làm known_face_locations
 │   .face_encodings()   │  → skip HOG detection của dlib (~30-50% faster)
-│   → 128-d vector      │  ~20-50ms/khuôn mặt (CPU, dlib CNN)
+│   → 128-d vector      │  ~20-50ms/khuôn mặt (CPU, dlib)
 └───────────┬───────────┘
             │
             ▼
 ┌───────────────────────┐
 │   Matching             │
 │   face_distance()      │  NumPy vectorized vs known_encodings
-│   tolerance = 0.6      │  distance ≤ 0.6 → KNOWN
+│   Top-K weighted vote  │  weight = (1 - distance) per encoding
+│   tolerance = 0.5      │  distance ≤ 0.5 → tính vào vote
 └───────────┬───────────┘
             │
             ▼
@@ -214,7 +215,7 @@ Camera Frame (1280×720)
 | `RECOGNITION_INTERVAL` | **10** | Re-encode mỗi 10 frames — giảm 50% lần gọi dlib |
 | `DETECTION_CONFIDENCE` | 0.3 | Ngưỡng confidence tối thiểu (thấp = bắt mặt xa hơn) |
 | `RECOGNITION_PADDING` | 15px | Padding quanh bbox khi encode |
-| `TOLERANCE` | 0.6 | Ngưỡng matching (thấp hơn = strict hơn) |
+| `TOLERANCE` | 0.5 | Ngưỡng matching (thấp hơn = strict hơn) |
 
 ### 4.3 Hiệu suất ước tính (CPU, không GPU)
 
@@ -300,11 +301,19 @@ family_images/
 │  For each image (.jpg/.png):     │
 │    1. cv2.imread()               │
 │    2. YOLO detect → best box     │
-│       ├─ conf ≥ 0.5 → crop+enc  │
+│       ├─ conf ≥ 0.5 → truyền    │
+│       │   bbox làm               │
+│       │   known_face_locations   │
+│       │   → face_encodings()     │
 │       └─ conf < 0.5 → fallback  │
 │           face_recognition full  │
 │    3. → 128-d vector             │
-│    4. Append to list             │
+│    4. Append to person_encs[]    │
+│                                  │
+│  _cluster_to_max(person_encs,    │
+│    MAX_ENCODINGS_PER_PERSON=50)  │
+│  → giữ tối đa 50 encoding        │
+│    đa dạng nhất per person       │
 └──────────────┬───────────────────┘
                │
                ▼
@@ -336,17 +345,19 @@ face_encodings_hybrid.pkl (200-400 encodings)
 │     O(n²) — chỉ chạy offline    │
 │                                  │
 │  3. Clustering:                  │
-│     distance < 0.15 → same group │
+│     distance < 0.25 → same group │
 │                                  │
 │  4. Select representative:       │
 │     closest to centroid          │
 │                                  │
-│  5. If > 30 per person:          │
-│     quality-diverse sampling     │
+│  5. If still > 50 per person:    │
+│     quality-diverse sampling:    │
+│     sort by quality, pick evenly │
+│     → giữ cả high + low quality  │
 └──────────────┬───────────────────┘
                │
                ▼
-face_encodings_hybrid.pkl (50-90 encodings)
+face_encodings_hybrid.pkl (50-150 encodings)
    ~3-5x faster recognition
    Giữ diversity: high-quality + adverse-condition
 ```

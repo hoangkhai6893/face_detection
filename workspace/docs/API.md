@@ -1,7 +1,7 @@
 # API Specification — Family Face Recognition System
 
-**Phiên bản:** 2.0
-**Ngày:** 2026-03-29
+**Phiên bản:** 2.1
+**Ngày:** 2026-05-31
 
 ---
 
@@ -30,8 +30,8 @@ Centralized configuration — tất cả paths và thresholds.
 | `FRAME_DETECT_CONF` | `float` | `0.15` | YOLO conf (frame extract) |
 | `HIGH_CONFIDENCE_THRESHOLD` | `float` | `0.35` | YOLO conf (optimizer) |
 | `OPTIMIZE_QUALITY_THRESHOLD` | `float` | `0.15` | Min quality (optimizer) |
-| `MAX_ENCODINGS_PER_PERSON` | `int` | `30` | Max encodings sau optimize |
-| `CLUSTERING_THRESHOLD` | `float` | `0.15` | Distance ngưỡng clustering |
+| `MAX_ENCODINGS_PER_PERSON` | `int` | `50` | Max encodings per person sau clustering |
+| `CLUSTERING_THRESHOLD` | `float` | `0.25` | Distance ngưỡng clustering (tăng từ 0.15 để giữ đa dạng góc/ánh sáng) |
 | `FRAME_WIDTH` | `int` | `1280` | Camera width |
 | `FRAME_HEIGHT` | `int` | `720` | Camera height |
 
@@ -76,10 +76,11 @@ Crop vùng mặt từ frame với pixel padding.
 **Behavior:**
 1. Load YOLO model
 2. Duyệt mỗi person folder trong `dataset_path`
-3. Với mỗi ảnh: YOLO detect → crop → face_recognition encode → 128-d vector
-4. Fallback: nếu YOLO không detect, chạy face_recognition trên toàn ảnh
-5. Backup file .pkl cũ trước khi ghi mới
-6. Lưu `{encodings: List[ndarray], names: List[str]}` vào pickle
+3. Với mỗi ảnh: YOLO detect → truyền bbox trực tiếp làm `known_face_locations` → `face_encodings()` → 128-d vector
+4. Fallback: nếu YOLO không detect đủ confidence, chạy face_recognition trên toàn ảnh
+5. Sau khi encode hết ảnh của một person → `_cluster_to_max()` → giới hạn `MAX_ENCODINGS_PER_PERSON=50`
+6. Backup file .pkl cũ trước khi ghi mới
+7. Lưu `{encodings: List[ndarray], names: List[str]}` vào pickle
 
 ---
 
@@ -188,7 +189,7 @@ Hệ thống nhận diện real-time.
 | Method | Input | Output | Mô tả |
 |--------|-------|--------|-------|
 | `detect_faces_yolo(frame)` | `np.ndarray` | `List[(x1,y1,x2,y2,conf)]` | YOLO detect all faces |
-| `recognize_face_in_region(frame, x1, y1, x2, y2)` | `ndarray, int×4` | `str` | Tên + confidence hoặc "Unknown" |
+| `recognize_face_in_region(frame, x1, y1, x2, y2)` | `ndarray, int×4` | `str` | Tên + confidence hoặc "Unknown". Dùng weighted voting: weight=(1-distance) |
 | `draw_results(frame, detections, names)` | `ndarray, list, list` | `np.ndarray` | Vẽ bbox + label |
 | `run_recognition(camera_id, frame_width, frame_height)` | `int, int, int` | `None` | Main loop nhận diện |
 

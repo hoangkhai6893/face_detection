@@ -51,9 +51,9 @@ Camera → YOLO detect → crop + padding → face_recognition encode
 Training flow:
 ```
 video/camera → FrameExtractor (quality + diversity filter) → family_images/<person>/
-→ rebuild_encodings() → model/encodings.pkl
-→ (optional) optimize: clustering dedup → MAX_ENCODINGS_PER_PERSON
+→ rebuild_encodings() → _cluster_to_max() per person → model/encodings.pkl
 ```
+Clustering (max `MAX_ENCODINGS_PER_PERSON=50`) applied inside `rebuild_encodings()` và `update_person_encodings()` — không cần bước optimize riêng.
 
 ## Important Config Values (src/config.py)
 
@@ -62,8 +62,8 @@ video/camera → FrameExtractor (quality + diversity filter) → family_images/<
 | `TOLERANCE` | 0.5 | Face match threshold — lower = stricter |
 | `RECOGNITION_TOP_K` | 5 | Top-K voting window |
 | `CONFUSION_MARGIN` | 0.10 | Min gap winner vs runner-up |
-| `MAX_ENCODINGS_PER_PERSON` | 30 | After clustering optimization |
-| `CLUSTERING_THRESHOLD` | 0.15 | Near-duplicate dedup distance |
+| `MAX_ENCODINGS_PER_PERSON` | 50 | After clustering optimization |
+| `CLUSTERING_THRESHOLD` | 0.25 | Near-duplicate dedup distance |
 
 ## Common Tasks
 

@@ -1,3 +1,4 @@
+.env
 **/**/*.jpg
 **/**/*.jpeg
 **/**/**/*.jng
@@ -10,3 +11,12 @@ __pycache__/
 .remember
 .vscode
 **/__pycache__
+tests/__pycache__
+*.log
+*.pot
+*.pyc
+*.pyo
+*.pyd
+*.db
+*.sqlite3
+*.egg-info/

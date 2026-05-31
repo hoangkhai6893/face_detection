@@ -19,7 +19,7 @@ family_images/
     ...          ← max MAX_SAMPLES_PER_PERSON (50) raw images
 ```
 
-After `rebuild_encodings()` → `model/encodings.pkl` (max `MAX_ENCODINGS_PER_PERSON=30` after clustering).
+After `rebuild_encodings()` → `model/encodings.pkl` (max `MAX_ENCODINGS_PER_PERSON=50` after clustering per person).
 
 ## Collection Pipeline
 

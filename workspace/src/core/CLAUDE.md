@@ -17,12 +17,23 @@
 
 ```
 YOLO bbox → top-K nearest encodings (K=5)
-          → vote by name → winner
+          → weighted vote: weight = (1 - distance) per encoding
+          → winner = person with highest total weight
           → if (winner_dist - runnerup_dist) < CONFUSION_MARGIN → Unknown
           → else → winner name
 ```
 
 Key constants (all in `src/config.py`): `RECOGNITION_TOP_K=5`, `CONFUSION_MARGIN=0.10`, `TOLERANCE=0.5`.
+
+Voting dùng **distance-weighted**: encoding gần hơn (nhỏ distance) có trọng số lớn hơn — phân biệt tốt hơn khi 2 thành viên có embedding gần nhau.
+
+## Encoding Pipeline (encoder.py)
+
+`_extract_face_encoding()`: YOLO detect → truyền bbox trực tiếp làm `known_face_locations` vào `face_encodings()` — **bỏ bước HOG trung gian**, nhất quán với `recognizer.py`.
+
+`rebuild_encodings()`: sau khi encode từng ảnh, gọi `_cluster_to_max()` per person → giới hạn `MAX_ENCODINGS_PER_PERSON=50` ngay trong rebuild (không cần bước optimize riêng).
+
+`update_person_encodings()`: tương tự, gộp encoding cũ + mới → cluster → lưu.
 
 ## Encoding File Format
 

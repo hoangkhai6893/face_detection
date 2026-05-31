@@ -55,7 +55,14 @@
       "Bash(sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-12 100)",
       "Edit(/.claude/skills/run-workspace/**)",
       "Bash(kill 26603)",
-      "Bash(mkdir -p /home/dkhai/.claude/projects/-home-dkhai-workspace/memory)"
+      "Bash(mkdir -p /home/dkhai/.claude/projects/-home-dkhai-workspace/memory)",
+      "Bash(python -m pytest tests/ -x -q)",
+      "Skill(telegram:configure)",
+      "Skill(telegram:configure:*)",
+      "Bash(cat ~/.claude/channels/telegram/.env 2>/dev/null && echo \"---EXISTS---\" || echo \"---NOT_FOUND---\")",
+      "Read(//home/ubuntu/.claude/channels/telegram/**)",
+      "Bash(cat ~/.claude/channels/telegram/access.json 2>/dev/null && echo \"---EXISTS---\" || echo \"---NOT_FOUND---\")",
+      "Bash(pip show *)"
     ],
     "additionalDirectories": [
       "/home/dkhai/.claude/projects/-home-dkhai-workspace/memory"
