@@ -10,7 +10,7 @@
 | `frame_quality.py` | Quality score: Laplacian variance + face size |
 | `frame_diversity.py` | Filter near-duplicate frames before saving |
 | `recognition_stabilizer.py` | Temporal smoothing — prevents name flickering across frames |
-| `motion_guard.py` | Skip frames with motion blur |
+| `motion_guard.py` | `MotionGuard` — IDLE/ACTIVE state machine: tiết kiệm CPU khi không có người, probe burst khi timeout |
 | `face_utils.py` | `extract_face_region()` — crop + clamp helper |
 
 ## Recognition Decision Logic
@@ -44,3 +44,24 @@ Voting dùng **distance-weighted**: encoding gần hơn (nhỏ distance) có tr�
 ```
 
 Always backed up before overwrite — see `encoder.py`.
+
+## MotionGuard — State Machine
+
+`motion_guard.py` chạy state machine IDLE/ACTIVE để tiết kiệm CPU khi không có người:
+
+```
+IDLE  → check motion mỗi 6 frame (absdiff + MOG2, 160×90px, ~0.6ms)
+      → motion detected          → ACTIVE (trong 0.2s)
+      → timeout 60s              → probe burst 5 frame (YOLO only, không đổi state)
+           → thấy mặt            → ACTIVE
+           → không thấy mặt     → reset timer, vẫn IDLE
+
+ACTIVE → full pipeline mỗi frame (YOLO + dlib)
+       → 150 frame không thấy mặt → IDLE
+```
+
+**API:**
+- `should_process(frame)` → `bool` — gọi mỗi frame, trả True khi nên chạy YOLO
+- `report_faces(count)` — gọi sau YOLO, quyết định đổi state
+
+**Quan trọng:** probe burst KHÔNG đổi state sang ACTIVE — chỉ `report_faces()` mới đổi state khi thấy mặt. Điều này loại bỏ vòng lặp ACTIVE↔IDLE vô tận khi không có người ở nhà.

@@ -63,6 +63,7 @@ class MotionGuard:
         absdiff_threshold: float  = config.MOTION_ABSDIFF_THRESHOLD,
         mog2_threshold: float     = config.MOTION_MOG2_THRESHOLD,
         max_idle_sec: float       = config.MOTION_MAX_IDLE_SEC,
+        probe_burst: int          = config.IDLE_PROBE_BURST,
         logger: Optional[logging.Logger] = None,
     ) -> None:
         self._idle_sample_every = idle_sample_every
@@ -70,12 +71,14 @@ class MotionGuard:
         self._absdiff_threshold = absdiff_threshold
         self._mog2_threshold    = mog2_threshold
         self._max_idle_sec      = max_idle_sec
+        self._probe_burst       = probe_burst
         self._logger = logger or logging.getLogger(__name__)
 
         # State machine
         self._state          = State.IDLE
         self._idle_skip      = 0       # frame counter để throttle khi IDLE
         self._no_face_count  = 0       # frame ACTIVE liên tiếp không có mặt
+        self._probe_count    = 0       # frame probe còn lại (0 = không probe)
         self._last_yolo_time = time.time()
 
         # Motion detection internals
@@ -111,13 +114,20 @@ class MotionGuard:
     def report_faces(self, face_count: int) -> None:
         """
         Gọi sau mỗi lần YOLO chạy với số mặt phát hiện được.
-        Dùng để quyết định có về IDLE không.
+        Dùng để quyết định có về IDLE không, hoặc lên ACTIVE từ probe.
         """
         self._last_yolo_time = time.time()
 
-        if self._state != State.ACTIVE:
+        if self._state == State.IDLE:
+            # Đang probe: nếu thấy mặt → lên ACTIVE, không cần chờ hết burst
+            if face_count > 0:
+                self._state = State.ACTIVE
+                self._no_face_count = 0
+                self._probe_count = 0
+                self._logger.info("MotionGuard: IDLE → ACTIVE (face confirmed via probe)")
             return
 
+        # ACTIVE: đếm frame không có mặt để quyết định về IDLE
         if face_count > 0:
             self._no_face_count = 0
         else:
@@ -137,6 +147,11 @@ class MotionGuard:
 
     def _idle_step(self, frame: np.ndarray) -> bool:
         """Throttle: chỉ check motion mỗi N frame khi IDLE."""
+        # Probe burst đang chạy: ưu tiên cao nhất, không throttle
+        if self._probe_count > 0:
+            self._probe_count -= 1
+            return True
+
         self._idle_skip += 1
         if self._idle_skip < self._idle_sample_every:
             return False
@@ -148,12 +163,14 @@ class MotionGuard:
             self._logger.info("MotionGuard: IDLE → ACTIVE (motion detected)")
             return True
 
-        # Idle fallback: force-run nếu quá lâu không xử lý
-        # (tránh người đứng yên ngay từ đầu không bị bỏ qua)
+        # Probe timeout: chạy burst N frame để bắt người đứng yên.
+        # KHÔNG đổi state — report_faces() sẽ quyết định nếu thấy mặt.
         if (time.time() - self._last_yolo_time) > self._max_idle_sec:
-            self._state = State.ACTIVE
-            self._no_face_count = 0
-            self._logger.info("MotionGuard: IDLE → ACTIVE (idle timeout)")
+            self._probe_count = self._probe_burst - 1  # frame này đã tính là 1
+            self._last_yolo_time = time.time()         # reset timer, tránh trigger liên tục
+            self._logger.debug(
+                "MotionGuard: idle probe started (%d frames)", self._probe_burst
+            )
             return True
 
         return False

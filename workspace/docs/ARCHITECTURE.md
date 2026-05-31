@@ -80,7 +80,7 @@ scripts/ (maintenance tools — chạy độc lập)
 | `frame_extractor.py` | `VideoFrameExtractor`, `ExtractedFrame` | Pipeline chính: đọc video → detect → filter → yield frame |
 | `frame_quality.py` | `FrameQualityChecker` | Đánh giá chất lượng frame: độ nét, độ sáng, kích thước |
 | `frame_diversity.py` | `FrameDiversityFilter` | Lọc frame trùng lặp bằng SSIM + khoảng cách temporal |
-| `motion_guard.py` | `MotionGuard` | Bỏ qua frame không có chuyển động — tiết kiệm CPU |
+| `motion_guard.py` | `MotionGuard` | State machine IDLE/ACTIVE — tiết kiệm CPU khi vắng người, probe burst khi timeout |
 | `recognition_stabilizer.py` | `RecognitionStabilizer` | Anti-noise: chống nhận diện giật/nhiễu real-time |
 
 ### 3.2 Services Layer (`src/services/`)
@@ -224,6 +224,72 @@ Camera Frame (1280×720)
 | PyTorch + 640px + interval=5 (cũ) | ~10-17 FPS |
 | ONNX + 416px + interval=10 (mới) | ~22-30 FPS |
 | Gain | **+50-80%** |
+
+### 4.4 MotionGuard — State Machine IDLE/ACTIVE
+
+Camera chạy 24/7 nhưng không phải lúc nào cũng có người. MotionGuard giảm CPU xuống gần 0 khi không có ai, đồng thời đảm bảo phát hiện đột nhập ngay khi có người vào.
+
+#### Sơ đồ state machine
+
+```
+                    ┌──────────────────────────────────────────┐
+                    │                  IDLE                    │
+                    │  - check motion mỗi 6 frame (~0.6ms)    │
+                    │  - CPU ~2%                               │
+                    └──────────┬───────────────────────────────┘
+                               │
+           ┌───────────────────┼──────────────────────┐
+           │                   │                      │
+     motion detected     probe thấy mặt        probe 5 frame
+     (trong 0.2 giây)    (trong 60 giây)       không thấy mặt
+           │                   │                      │
+           ▼                   ▼                      ▼
+      ┌─────────┐         ┌─────────┐           reset timer
+      │ ACTIVE  │         │ ACTIVE  │           vẫn IDLE
+      │ YOLO+   │         │ YOLO+   │
+      │ dlib    │         │ dlib    │
+      │ CPU~50% │         │ CPU~50% │
+      └────┬────┘         └────┬────┘
+           │                   │
+      không mặt 150 frame  không mặt 150 frame
+           └──────────┬────────┘
+                      ▼
+                    IDLE
+```
+
+#### Ba trigger chuyển sang ACTIVE
+
+| Trigger | Thời gian phát hiện | Kịch bản |
+|---------|-------------------|---------|
+| **Motion detected** | < 0.2s (6 frame) | Người đi vào bình thường |
+| **Probe thấy mặt** | ≤ 60s | Người đứng yên hoàn toàn |
+| *(không có)* | — | Không có ai, tiết kiệm CPU |
+
+#### Probe burst — tránh bỏ sót mặt
+
+Khi timeout 60s, hệ thống chạy **5 frame YOLO liên tiếp** (không throttle, không đổi state).
+Nếu bất kỳ frame nào thấy mặt → lên ACTIVE. Nếu cả 5 frame không thấy → reset timer, vẫn IDLE.
+
+> **Tại sao 5 frame?** YOLO có thể bỏ sót mặt nghiêng/tối trong 1 frame đơn lẻ. 5 frame liên tiếp (~0.17s) tăng độ tin cậy detection đáng kể mà chi phí CPU không đáng kể.
+
+#### Tham số liên quan (config.py)
+
+| Tham số | Giá trị | Ý nghĩa |
+|---------|---------|--------|
+| `IDLE_SAMPLE_EVERY` | 6 | Check motion mỗi 6 frame khi IDLE |
+| `IDLE_NO_FACE_FRAMES` | 150 | ACTIVE → IDLE sau 150 frame (~5s) không thấy mặt |
+| `MOTION_MAX_IDLE_SEC` | 60 | Thời gian IDLE tối đa trước khi probe |
+| `IDLE_PROBE_BURST` | 5 | Số frame YOLO chạy liên tiếp khi probe |
+| `MOTION_ABSDIFF_THRESHOLD` | 8 | Ngưỡng absdiff phát hiện chuyển động |
+| `MOTION_MOG2_THRESHOLD` | 5 | Ngưỡng MOG2 xác nhận motion thật (không phải ánh sáng) |
+
+#### So sánh CPU trước và sau
+
+| Tình huống | Trước | Sau |
+|-----------|-------|-----|
+| Không có ai (24h) | Loop ACTIVE↔IDLE mỗi 15s — full pipeline 33% thời gian | Probe 5 frame mỗi 60s — gần như 0% |
+| Có người di chuyển | ACTIVE ngay khi có motion | Không đổi |
+| Có người đứng yên | ACTIVE sau 10s | ACTIVE sau tối đa 60s |
 
 ---
 

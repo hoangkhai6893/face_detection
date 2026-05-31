@@ -139,9 +139,12 @@ MOTION_ABSDIFF_THRESHOLD = 8
 # MOG2: % pixels được đánh dấu foreground (0–100) sau khi absdiff trigger.
 #   < threshold → chỉ là thay đổi ánh sáng, không phải người → skip YOLO.
 MOTION_MOG2_THRESHOLD = 5
-# Idle fallback: nếu YOLO không chạy quá N giây, force-run dù không có motion.
-#   Đảm bảo người đứng yên lâu không bị MOG2 "nuốt" vào background.
-MOTION_MAX_IDLE_SEC = 10
+# Idle probe: nếu YOLO không chạy quá N giây, chạy probe burst để bắt người đứng yên.
+#   Tăng lên 60s (từ 10s) vì probe không đổi state → không tạo vòng lặp ACTIVE↔IDLE.
+MOTION_MAX_IDLE_SEC = 60
+# Số frame YOLO chạy liên tiếp khi probe timeout (không throttle, không đổi state).
+#   5 frame ÷ 30fps ≈ 0.17s — đủ để bắt mặt bị bỏ sót do góc nghiêng/tối.
+IDLE_PROBE_BURST = 5
 
 # --- State machine IDLE/ACTIVE (MotionGuard) ---
 # IDLE: chỉ check motion mỗi N frame → ~5fps tại camera 30fps (~2% CPU)

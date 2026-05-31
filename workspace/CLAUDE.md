@@ -22,7 +22,7 @@ src/
     frame_quality.py       # Quality scoring (Laplacian, face size)
     frame_diversity.py     # Diversity filtering (avoid near-duplicate frames)
     recognition_stabilizer.py  # Temporal smoothing across frames
-    motion_guard.py        # Skip blurry frames from motion
+    motion_guard.py        # IDLE/ACTIVE state machine — probe burst khi timeout
     face_utils.py          # extract_face_region() — crop helper
   training/
     cli.py                 # Training CLI commands
