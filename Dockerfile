@@ -1,4 +1,4 @@
-FROM python:3.13-slim
+FROM python:3.15-rc
 SHELL ["/bin/bash","-o" ,"pipefail","-c"]
 RUN DEBIAN_FRONTEND=noninteractive
 ENV TZ=Asia/Tokyo

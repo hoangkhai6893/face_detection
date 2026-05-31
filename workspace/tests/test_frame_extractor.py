@@ -9,12 +9,9 @@ import cv2
 import numpy as np
 import pytest
 
-from core.frame_extractor import (
-    ExtractedFrame,
-    FrameDiversityFilter,
-    FrameQualityChecker,
-    VideoFrameExtractor,
-)
+from core.frame_extractor import ExtractedFrame, VideoFrameExtractor
+from core.frame_quality import FrameQualityChecker
+from core.frame_diversity import FrameDiversityFilter
 
 
 # ---------------------------------------------------------------------------

@@ -5,7 +5,7 @@ import json
 import os
 import pytest
 from unittest.mock import MagicMock, patch
-from device_dispatcher import (
+from services.device_dispatcher import (
     DeviceDispatcher, PersonProfile, DeviceAction,
     LogBackend, WebhookBackend, MqttBackend, SerialBackend,
 )
@@ -72,7 +72,7 @@ class TestWebhookBackend:
         backend = WebhookBackend()
         mock_resp = MagicMock()
         mock_resp.status_code = 200
-        with patch("device_dispatcher.WebhookBackend.trigger") as mock_trigger:
+        with patch("services.device_dispatcher.WebhookBackend.trigger") as mock_trigger:
             mock_trigger.return_value = True
             result = backend.trigger("light", "on", {"url": "http://example.com/webhook"})
 

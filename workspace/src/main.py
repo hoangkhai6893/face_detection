@@ -26,12 +26,12 @@ from typing import Optional
 import numpy as np
 
 import config
-from recognizer import FaceRecognizer, setup_logging
-from alert_manager import AlertManager
-from event_logger import EventLogger
-from device_dispatcher import DeviceDispatcher
+from core.recognizer import FaceRecognizer, setup_logging
+from services.alert_manager import AlertManager
+from services.event_logger import EventLogger
+from services.device_dispatcher import DeviceDispatcher
 from core.recognition_stabilizer import RecognitionStabilizer
-from notification_worker import NotificationWorker
+from services.notification_worker import NotificationWorker
 
 
 def parse_args() -> argparse.Namespace:

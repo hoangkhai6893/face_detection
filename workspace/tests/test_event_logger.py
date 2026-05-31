@@ -5,7 +5,7 @@ import json
 import threading
 import numpy as np
 import pytest
-from event_logger import EventLogger
+from services.event_logger import EventLogger
 
 
 @pytest.fixture

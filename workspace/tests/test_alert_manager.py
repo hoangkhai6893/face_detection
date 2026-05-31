@@ -6,7 +6,7 @@ import time
 import numpy as np
 import pytest
 from unittest.mock import patch, MagicMock
-from alert_manager import AlertManager
+from services.alert_manager import AlertManager
 
 
 BBOX = (10, 20, 100, 120)
@@ -64,7 +64,7 @@ class TestTrigger:
 
 class TestTelegram:
     def test_telegram_skipped_when_no_token(self, manager, frame):
-        with patch("alert_manager.AlertManager._send_telegram") as mock_send:
+        with patch("services.alert_manager.AlertManager._send_telegram") as mock_send:
             manager.trigger(frame, BBOX)
             mock_send.assert_not_called()
 
@@ -76,7 +76,7 @@ class TestTelegram:
             telegram_bot_token="fake_token",
             telegram_chat_id="123456",
         )
-        with patch("alert_manager.AlertManager._send_telegram") as mock_send:
+        with patch("services.alert_manager.AlertManager._send_telegram") as mock_send:
             m.trigger(frame, BBOX)
             mock_send.assert_called_once()
 

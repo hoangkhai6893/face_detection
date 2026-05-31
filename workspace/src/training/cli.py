@@ -1,144 +1,35 @@
-
 #!/usr/bin/env python3
-
-"""
-Training Manager — unified data collection & person management tool.
-
-Features:
-  - Collect face data from a video file or live camera
-  - Automatic frame selection (quality + diversity filters)
-  - Interactive CLI: create / update / delete / reset persons
-  - Optional augmentation and encoding optimization after collection
-
-Usage:
-    python training_manager.py
-"""
-
 from __future__ import annotations
 
 import logging
 import os
-import re
-import shutil
 import sys
 import time
-from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
-
-import json
+from typing import Optional
 
 import cv2
-import numpy as np
 import questionary
-from tqdm import tqdm
 from ultralytics import YOLO
 
-# ---------------------------------------------------------------------------
-# Resolve imports regardless of working directory
-# ---------------------------------------------------------------------------
-_SRC = Path(__file__).parent
-sys.path.insert(0, str(_SRC))
-
 import config
-from core.encoder import rebuild_encodings, update_person_encodings
 from core.frame_extractor import (
-    ExtractedFrame,
-    FrameDiversityFilter,
     FrameQualityChecker,
+    FrameDiversityFilter,
     VideoFrameExtractor,
 )
+from training.extraction_settings import ExtractionSettings, EXTRACTION_PRESETS
+from training.person_manager import PersonManager, PersonInfo, _INVALID_NAME_RE
+from training.data_collection import DataCollectionSession, CollectionResult
 
-_SETTINGS_FILE = Path(config.DATASET_PATH).parent / "extraction_settings.json"
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    datefmt="%H:%M:%S",
-)
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Data classes
-# ---------------------------------------------------------------------------
+_WORKSPACE = Path(__file__).parent.parent.parent
 
-@dataclass
-class PersonInfo:
-    name: str
-    image_count: int
-    augmented_count: int
-    folder_path: Path
-    created_date: str
+_VIDEO_EXTS = {".mp4", ".avi", ".mov", ".mkv", ".wmv", ".m4v"}
+_CREATE_NEW = "[ + Tạo người mới ]"
 
-
-@dataclass
-class CollectionResult:
-    person_name: str
-    frames_processed: int
-    frames_saved: int
-    frames_rejected: int
-    reject_reasons: Dict[str, int] = field(default_factory=dict)
-    duration_seconds: float = 0.0
-    avg_quality: float = 0.0
-
-
-@dataclass
-class ExtractionSettings:
-    """All tunable parameters for frame extraction strictness.
-
-    Persisted to *_SETTINGS_FILE* so the user does not have to re-tune every
-    session. Changing any value here affects the next call to _get_extractor().
-    """
-    min_laplacian: float = config.FRAME_MIN_LAPLACIAN
-    min_face_px: int = config.FRAME_MIN_FACE_PX
-    detect_conf: float = config.FRAME_DETECT_CONF
-    ssim_threshold: float = 0.85
-    min_frame_gap: int = 10
-    frame_skip: int = 3
-
-    def save(self, path: Path = _SETTINGS_FILE) -> None:
-        with open(path, "w", encoding="utf-8") as fh:
-            json.dump({
-                "min_laplacian": self.min_laplacian,
-                "min_face_px": self.min_face_px,
-                "detect_conf": self.detect_conf,
-                "ssim_threshold": self.ssim_threshold,
-                "min_frame_gap": self.min_frame_gap,
-                "frame_skip": self.frame_skip,
-            }, fh, indent=2)
-
-    @classmethod
-    def load(cls, path: Path = _SETTINGS_FILE) -> "ExtractionSettings":
-        if not path.exists():
-            return cls()
-        try:
-            with open(path, encoding="utf-8") as fh:
-                data = json.load(fh)
-            defaults = cls()
-            return cls(
-                min_laplacian=float(data.get("min_laplacian", defaults.min_laplacian)),
-                min_face_px=int(data.get("min_face_px", defaults.min_face_px)),
-                detect_conf=float(data.get("detect_conf", defaults.detect_conf)),
-                ssim_threshold=float(data.get("ssim_threshold", defaults.ssim_threshold)),
-                min_frame_gap=int(data.get("min_frame_gap", defaults.min_frame_gap)),
-                frame_skip=int(data.get("frame_skip", defaults.frame_skip)),
-            )
-        except Exception:
-            return cls()
-
-
-# Three built-in presets — "Lenient" through "Strict"
-_EXTRACTION_PRESETS: Dict[str, ExtractionSettings] = {
-    "Thoai mai — bat nhieu frame, it reject nhat": ExtractionSettings(
-        min_laplacian=5, min_face_px=50, detect_conf=0.08,
-        ssim_threshold=0.93, min_frame_gap=5, frame_skip=2,
-    ),
-    "Binh thuong — khuyen nghi (mac dinh)": ExtractionSettings(),
-    "Khat khe — chi lay frame chat luong cao": ExtractionSettings(
-        min_laplacian=40, min_face_px=120, detect_conf=0.30,
-        ssim_threshold=0.78, min_frame_gap=20, frame_skip=6,
-    ),
-}
+_SETTINGS_FILE = Path(config.DATASET_PATH).parent / "extraction_settings.json"
 
 
 def _float_validator(lo: float, hi: float):
@@ -165,319 +56,6 @@ def _int_validator(lo: int, hi: int):
             return True
         return f"Nhap so nguyen tu {lo} den {hi}"
     return _v
-
-
-# ---------------------------------------------------------------------------
-# Person Manager — CRUD
-# ---------------------------------------------------------------------------
-
-_INVALID_NAME_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]|^\.|^\.\.')
-_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp"}
-
-
-class PersonManager:
-    """Create, list, delete, and reset person folders in the dataset."""
-
-    def __init__(self, dataset_path: str = config.DATASET_PATH):
-        self.dataset_path = Path(dataset_path)
-        self.dataset_path.mkdir(parents=True, exist_ok=True)
-
-    # ------------------------------------------------------------------
-    # Queries
-    # ------------------------------------------------------------------
-
-    def list_persons(self) -> List[PersonInfo]:
-        persons = []
-        for entry in sorted(self.dataset_path.iterdir()):
-            if not entry.is_dir():
-                continue
-            images = [
-                f for f in entry.iterdir()
-                if f.suffix.lower() in _IMAGE_EXTS
-            ]
-            aug = [f for f in images if "_aug_" in f.name]
-            orig = [f for f in images if "_aug_" not in f.name]
-            created = time.strftime(
-                "%Y-%m-%d", time.localtime(entry.stat().st_ctime)
-            )
-            persons.append(PersonInfo(
-                name=entry.name,
-                image_count=len(orig),
-                augmented_count=len(aug),
-                folder_path=entry,
-                created_date=created,
-            ))
-        return persons
-
-    def get_image_count(self, name: str) -> int:
-        folder = self.dataset_path / name
-        if not folder.is_dir():
-            return 0
-        return sum(
-            1 for f in folder.iterdir()
-            if f.suffix.lower() in _IMAGE_EXTS and "_aug_" not in f.name
-        )
-
-    def get_augmented_count(self, name: str) -> int:
-        folder = self.dataset_path / name
-        if not folder.is_dir():
-            return 0
-        return sum(
-            1 for f in folder.iterdir()
-            if f.suffix.lower() in _IMAGE_EXTS and "_aug_" in f.name
-        )
-
-    def exists(self, name: str) -> bool:
-        return (self.dataset_path / name).is_dir()
-
-    # ------------------------------------------------------------------
-    # Mutations
-    # ------------------------------------------------------------------
-
-    def create_person(self, name: str) -> Path:
-        """Create a new person folder. Raises ValueError for invalid names."""
-        if _INVALID_NAME_RE.search(name) or not name.strip():
-            raise ValueError(f"Invalid person name: {name!r}")
-        path = self.dataset_path / name
-        path.mkdir(parents=True, exist_ok=True)
-        logger.info("Created person folder: %s", path)
-        return path
-
-    def delete_person(self, name: str, rebuild: bool = True) -> bool:
-        """Delete a person folder and optionally rebuild encodings."""
-        path = self.dataset_path / name
-        if not path.is_dir():
-            logger.warning("Person not found: %s", name)
-            return False
-        shutil.rmtree(path)
-        logger.info("Deleted person: %s", name)
-        if rebuild:
-            self._rebuild()
-        return True
-
-    def reset_person(self, name: str, rebuild: bool = True) -> int:
-        """Delete all images for a person (keep folder). Returns image count deleted."""
-        path = self.dataset_path / name
-        if not path.is_dir():
-            logger.warning("Person not found: %s", name)
-            return 0
-        images = [
-            f for f in path.iterdir()
-            if f.suffix.lower() in _IMAGE_EXTS
-        ]
-        for f in images:
-            f.unlink()
-        logger.info("Reset person %s: deleted %d images", name, len(images))
-        if rebuild:
-            self._rebuild()
-        return len(images)
-
-    # ------------------------------------------------------------------
-    # Internal
-    # ------------------------------------------------------------------
-
-    def _rebuild(self) -> None:
-        encodings_path = os.path.join(config.ENCODINGS_DIR, "face_encodings_hybrid.pkl")
-        logger.info("Rebuilding encodings → %s", encodings_path)
-        total_enc, total_persons = rebuild_encodings(
-            dataset_path=str(self.dataset_path),
-            model_path=config.MODEL_PATH,
-            encodings_path=encodings_path,
-            logger=logger,
-        )
-        logger.info(
-            "Encodings rebuilt — %d encodings for %d persons",
-            total_enc, total_persons,
-        )
-
-
-# ---------------------------------------------------------------------------
-# Data Collection Session
-# ---------------------------------------------------------------------------
-
-class DataCollectionSession:
-    """Orchestrates a single data collection run for one person."""
-
-    def __init__(
-        self,
-        person_name: str,
-        extractor: VideoFrameExtractor,
-        dataset_path: str = config.DATASET_PATH,
-    ):
-        self.person_name = person_name
-        self.extractor = extractor
-        self.person_folder = Path(dataset_path) / person_name
-        self.person_folder.mkdir(parents=True, exist_ok=True)
-        self._saved_frame_paths: List[str] = []  # track new files for incremental update
-
-    # ------------------------------------------------------------------
-    # Public
-    # ------------------------------------------------------------------
-
-    def run_from_file(
-        self,
-        video_path: str,
-        max_frames: int = 200,
-    ) -> CollectionResult:
-        """Process a video file and save high-quality face crops."""
-        logger.info("Processing video: %s (max %d frames)", video_path, max_frames)
-        start = time.time()
-
-        qualities: List[float] = []
-        reject_reasons: Dict[str, int] = {}
-        frames_processed = 0
-        frames_saved = 0
-
-        cap = cv2.VideoCapture(video_path)
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
-        fps_src = cap.get(cv2.CAP_PROP_FPS) or 30.0
-        cap.release()
-
-        # Use tqdm over the generator for a progress bar
-        with tqdm(
-            total=min(max_frames, total_frames // self.extractor.frame_skip or max_frames),
-            desc=f"  Collecting for {self.person_name}",
-            unit="frame",
-            ncols=80,
-        ) as pbar:
-            for ef in self.extractor.extract_from_file(video_path, max_frames):
-                frames_saved += 1
-                qualities.append(ef.quality_score)
-                self._save_frame(ef)
-                pbar.update(1)
-                pbar.set_postfix(saved=frames_saved, q=f"{ef.quality_score:.2f}")
-
-        # Estimate processed frames
-        cap2 = cv2.VideoCapture(video_path)
-        frames_processed = int(cap2.get(cv2.CAP_PROP_FRAME_COUNT))
-        cap2.release()
-
-        result = CollectionResult(
-            person_name=self.person_name,
-            frames_processed=frames_processed,
-            frames_saved=frames_saved,
-            frames_rejected=frames_processed - frames_saved,
-            reject_reasons=reject_reasons,
-            duration_seconds=time.time() - start,
-            avg_quality=float(np.mean(qualities)) if qualities else 0.0,
-        )
-        if frames_saved > 0:
-            self._rebuild_encodings()
-        return result
-
-    def run_from_camera(
-        self,
-        camera_id: int = 0,
-        target_frames: int = 50,
-        raw_video_dir: Optional[str] = None,
-    ) -> CollectionResult:
-        """Record a raw video from camera, then extract frames with retry logic.
-
-        Flow:
-          1. Record raw video (preview → SPACE to start → SPACE/Q/ESC to stop)
-          2. Save .mp4 to *raw_video_dir* (default: <workspace>/data/)
-          3. Extract frames via extract_with_retry (up to 3 passes with
-             progressively relaxed thresholds until *target_frames* is reached)
-          4. Rebuild encodings if any frames were saved
-        """
-        # Determine where to save raw recordings
-        if raw_video_dir is None:
-            workspace_root = Path(config.DATASET_PATH).parent
-            raw_video_dir = str(workspace_root / "data")
-
-        Path(raw_video_dir).mkdir(parents=True, exist_ok=True)
-
-        timestamp_ms = int(time.time() * 1000)
-        video_filename = f"{self.person_name}_{timestamp_ms}.mp4"
-        output_path = str(Path(raw_video_dir) / video_filename)
-
-        print(f"\n  Ghi video cho: {self.person_name}")
-        print(f"  File se luu tai: {output_path}")
-        print("  [SPACE = Bat dau ghi | SPACE / Q / ESC = Dung ghi]\n")
-
-        # Phase 1: Record raw video from camera
-        recorded_path = self.extractor.record_from_camera(camera_id, output_path)
-
-        if recorded_path is None:
-            logger.info("Camera recording cancelled — no frames collected")
-            return CollectionResult(
-                person_name=self.person_name,
-                frames_processed=0,
-                frames_saved=0,
-                frames_rejected=0,
-            )
-
-        logger.info("Video saved: %s", recorded_path)
-        print(f"\n  Video da luu: {recorded_path}")
-        print(f"  Dang xu ly video (target: {target_frames} frames)...\n")
-
-        # Phase 2: Extract frames with multi-pass retry
-        start = time.time()
-        qualities: List[float] = []
-        frames_saved = 0
-
-        cap = cv2.VideoCapture(recorded_path)
-        frames_processed = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
-        cap.release()
-
-        with tqdm(
-            total=target_frames,
-            desc=f"  Trich xuat frame",
-            unit="frame",
-            ncols=80,
-        ) as pbar:
-            for ef in self.extractor.extract_with_retry(recorded_path, target_frames):
-                frames_saved += 1
-                qualities.append(ef.quality_score)
-                self._save_frame(ef)
-                pbar.update(1)
-                pbar.set_postfix(saved=frames_saved, q=f"{ef.quality_score:.2f}")
-
-        result = CollectionResult(
-            person_name=self.person_name,
-            frames_processed=frames_processed,
-            frames_saved=frames_saved,
-            frames_rejected=max(0, frames_processed - frames_saved),
-            duration_seconds=time.time() - start,
-            avg_quality=float(np.mean(qualities)) if qualities else 0.0,
-        )
-        if frames_saved > 0:
-            self._rebuild_encodings()
-        return result
-
-    # ------------------------------------------------------------------
-    # Internal
-    # ------------------------------------------------------------------
-
-    def _save_frame(self, ef: ExtractedFrame) -> str:
-        timestamp_ms = int(time.time() * 1000)
-        filename = f"{self.person_name}_{timestamp_ms}_q{ef.quality_score:.2f}.jpg"
-        dest = self.person_folder / filename
-        cv2.imwrite(str(dest), ef.face_crop)
-        self._saved_frame_paths.append(str(dest))
-        return str(dest)
-
-    def _rebuild_encodings(self) -> None:
-        encodings_path = os.path.join(config.ENCODINGS_DIR, "face_encodings_hybrid.pkl")
-        new_added, total = update_person_encodings(
-            person_name=self.person_name,
-            new_image_paths=self._saved_frame_paths,
-            encodings_path=encodings_path,
-            model_path=config.MODEL_PATH,
-            logger=logger,
-        )
-        logger.info(
-            "Incremental update done: +%d new encodings → %d total for '%s'",
-            new_added, total, self.person_name,
-        )
-
-
-# ---------------------------------------------------------------------------
-# Interactive CLI
-# ---------------------------------------------------------------------------
-
-_VIDEO_EXTS = {".mp4", ".avi", ".mov", ".mkv", ".wmv", ".m4v"}
-_CREATE_NEW = "[ + Tạo người mới ]"
 
 
 class InteractiveCLI:
@@ -658,6 +236,7 @@ class InteractiveCLI:
 
     def _rebuild_flow(self) -> None:
         """Rebuild toàn bộ face encodings từ dataset dùng model hiện tại."""
+        from core.encoder import rebuild_encodings
         print(f"\n--- Rebuild Encodings ---")
         print(f"  Model   : {config.MODEL_PATH}")
         print(f"  Dataset : {config.DATASET_PATH}")
@@ -680,7 +259,6 @@ class InteractiveCLI:
         if not confirmed:
             return
 
-        import time
         start = time.time()
         print()
         total_enc, total_persons = rebuild_encodings(
@@ -695,6 +273,7 @@ class InteractiveCLI:
     def _augment_flow(self, person_name: Optional[str] = None) -> None:
         print("\n--- Augment Dataset ---")
         try:
+            sys.path.insert(0, str(_WORKSPACE / "scripts"))
             from augment_dataset import augment_person, AUGMENTATIONS
         except ImportError:
             logger.error("augment_dataset.py không tìm thấy trong sys.path")
@@ -734,6 +313,7 @@ class InteractiveCLI:
     def _optimize_flow(self) -> None:
         print("\n--- Optimize Encodings ---")
         try:
+            sys.path.insert(0, str(_WORKSPACE / "scripts"))
             from optimize_encodings import FaceEncodingOptimizer
         except ImportError:
             logger.error("optimize_encodings.py không tìm thấy")
@@ -869,10 +449,10 @@ class InteractiveCLI:
             elif action == "Ap dung preset":
                 preset_name = questionary.select(
                     "Chon preset:",
-                    choices=list(_EXTRACTION_PRESETS.keys()),
+                    choices=list(EXTRACTION_PRESETS.keys()),
                 ).ask()
                 if preset_name:
-                    self.settings = _EXTRACTION_PRESETS[preset_name]
+                    self.settings = EXTRACTION_PRESETS[preset_name]
                     print(f"  Da ap dung: {preset_name}")
             elif action == "Dat lai ve mac dinh":
                 self.settings = ExtractionSettings()

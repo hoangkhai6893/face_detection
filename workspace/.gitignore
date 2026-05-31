@@ -5,3 +5,8 @@ log/
 logs/
 .cache/
 alerts/*
+__pycache__/
+.pytest_cache
+.remember
+.vscode
+**/__pycache__
