@@ -5,7 +5,7 @@ Unit tests for FrameQualityChecker.
 import numpy as np
 import pytest
 
-from core.frame_extractor import FrameQualityChecker
+from core.frame_quality import FrameQualityChecker
 
 
 @pytest.fixture

@@ -55,48 +55,39 @@ Hệ thống nhận diện khuôn mặt gia đình kết hợp YOLO (face detect
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                    INTERACTIVE CLI                               │
-│               training_manager.py                                │
+│                    ENTRY POINTS                                  │
 │                                                                  │
-│  ┌──────────────┐ ┌────────────────────┐ ┌──────────────────┐   │
-│  │PersonManager  │ │DataCollectionSession│ │ExtractionSettings│   │
-│  │ CRUD persons  │ │ run_from_file()    │ │ Presets / tuning │   │
-│  └──────────────┘ └────────┬───────────┘ └──────────────────┘   │
-│                            │                                     │
-│  ┌──────────────┐ ┌───────▼─────────────────────────────────┐   │
-│  │augment_      │ │       VideoFrameExtractor               │   │
-│  │dataset.py    │ │                                         │   │
-│  │ 8 biến thể   │ │  ┌─────────────────┐ ┌───────────────┐  │   │
-│  └──────────────┘ │  │QualityChecker    │ │DiversityFilter│  │   │
-│                    │  │ sharp/bright/size│ │ SSIM dedup    │  │   │
-│  ┌──────────────┐ │  └─────────────────┘ └───────────────┘  │   │
-│  │optimize_     │ └────────────────────────────────────────┘   │
-│  │encodings.py  │                                               │
-│  │ clustering   │  ┌────────────────────────────────────────┐   │
-│  └──────────────┘  │ export_onnx.py                         │   │
-│                     │ .pt → .onnx (chạy 1 lần)              │   │
-│                     └────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────┘
-        │                    │
-        ▼                    ▼
-┌──────────────┐   ┌────────────────────────┐
-│  RECOGNIZER  │   │      DATA STORES       │
-│ recognizer.py│   │                        │
-│              │   │ family_images/<Person>/ │
-│ YOLO detect  │   │ model/*.pkl            │
-│ (ONNX/PT)    │   │ data/*.mp4             │
-│ → encode     │   │ src/yolo/*.onnx / *.pt │
-│ → match DB   │   └────────────────────────┘
-│ → display    │
-└──────────────┘
-        │
-        ▼
-┌──────────────────────────────────────────┐
-│            CORE UTILITIES                │
-│  core/face_utils.py    — crop face       │
-│  core/encoder.py       — rebuild pkl     │
-│  core/frame_extractor.py — video extract │
-└──────────────────────────────────────────┘
+│  src/face_manager.py          src/main.py                       │
+│  (cập nhật data / train lại)  (nhận diện real-time)             │
+└────────────────────┬───────────────────┬────────────────────────┘
+                     │                   │
+         ┌───────────▼──┐    ┌───────────▼──────────────┐
+         │  src/training/│    │       src/services/       │
+         │               │    │                           │
+         │ PersonManager │    │ AlertManager (Telegram)   │
+         │ DataCollection│    │ DeviceDispatcher (MQTT)   │
+         │ ExtractionSet │    │ EventLogger (JSONL)       │
+         │ InteractiveCLI│    │ NotificationWorker        │
+         └───────────────┘    └───────────────────────────┘
+                     │                   │
+                     └─────────┬─────────┘
+                               │
+         ┌─────────────────────▼─────────────────────────┐
+         │                  src/core/                     │
+         │                                               │
+         │  recognizer.py    — FaceRecognizer (camera)   │
+         │  encoder.py       — rebuild_encodings()       │
+         │  face_utils.py    — extract_face_region()     │
+         │  frame_extractor.py — VideoFrameExtractor     │
+         │  frame_quality.py   — FrameQualityChecker     │
+         │  frame_diversity.py — FrameDiversityFilter    │
+         │  motion_guard.py    — MotionGuard             │
+         │  recognition_stabilizer.py — anti-noise       │
+         └───────────────────────────────────────────────┘
+
+scripts/ (chạy độc lập, maintenance tools)
+  augment_dataset.py   optimize_encodings.py
+  export_onnx.py       benchmark_models.py
 ```
 
 ### Pipeline nhận diện real-time (chi tiết)
@@ -165,7 +156,7 @@ pip install dlib-bin
 ### Kiểm Tra Cài Đặt
 
 ```bash
-cd /home/dkhai/workspace
+cd /home/ubuntu/workspace
 python -c "import cv2, face_recognition, ultralytics; print('OK')"
 python -c "import onnxruntime; print('ONNX Runtime OK')"
 ```
@@ -177,8 +168,7 @@ python -c "import onnxruntime; print('ONNX Runtime OK')"
 ### Bước 1 — Export ONNX (chạy 1 lần, khuyến nghị)
 
 ```bash
-cd /home/dkhai/workspace/src
-python export_onnx.py
+python scripts/export_onnx.py
 ```
 
 Script sẽ:
@@ -188,14 +178,13 @@ Script sẽ:
 
 ```bash
 # Tùy chọn: export với imgsz khác
-python export_onnx.py --model yolo/yolov11n-face.pt --imgsz 416
+python scripts/export_onnx.py --model src/yolo/yolov11n-face.pt --imgsz 416
 ```
 
 ### Bước 2 — Thu Thập Dữ Liệu (Menu Chính)
 
 ```bash
-cd /home/dkhai/workspace/src
-python training_manager.py
+python src/face_manager.py
 ```
 
 Menu cung cấp 7 chức năng:
@@ -210,12 +199,11 @@ Menu cung cấp 7 chức năng:
 ### Bước 3 — Nhận Diện Real-Time
 
 ```bash
-cd /home/dkhai/workspace/src
-python recognizer.py
+python src/main.py
 
 # Tùy chọn:
-python recognizer.py --camera 0 --tolerance 0.6 --detection-confidence 0.3
-python recognizer.py --recognition-interval 10 --yolo-input-width 416
+python src/main.py --camera 0 --tolerance 0.6 --detection-confidence 0.3
+python src/main.py --recognition-interval 10 --yolo-input-width 416
 ```
 
 **Điều khiển:** Nhấn `q` để thoát.
@@ -224,16 +212,16 @@ python recognizer.py --recognition-interval 10 --yolo-input-width 416
 
 ```bash
 # Augment dataset
-python augment_dataset.py                    # toàn bộ dataset
-python augment_dataset.py --person Khai      # 1 người cụ thể
-python augment_dataset.py --no-preview       # bỏ qua preview
+python scripts/augment_dataset.py                    # toàn bộ dataset
+python scripts/augment_dataset.py --person Khai      # 1 người cụ thể
+python scripts/augment_dataset.py --no-preview       # bỏ qua preview
 
 # Tối ưu encodings
-python optimize_encodings.py
+python scripts/optimize_encodings.py
 
 # Benchmark YOLO models
-python benchmark_models.py
-python benchmark_models.py --frames 150 --sample 8
+python scripts/benchmark_models.py
+python scripts/benchmark_models.py --frames 150 --sample 8
 ```
 
 ---
@@ -246,7 +234,7 @@ Hệ thống đã tích hợp 3 tối ưu cho máy không có GPU:
 
 ```bash
 pip install onnxruntime
-python src/export_onnx.py          # Export 1 lần
+python scripts/export_onnx.py          # Export 1 lần
 # config.py tự động dùng .onnx từ đây
 ```
 
@@ -276,38 +264,54 @@ ONNX Runtime nhanh hơn PyTorch ~1.5-2x trên CPU vì:
 ## Cấu Trúc Dự Án
 
 ```
-/home/dkhai/workspace/
-├── README.md                    # File này
-├── USAGE_GUIDE.md               # Hướng dẫn nhanh
+workspace/
+├── README.md
 ├── extraction_settings.json     # Tham số trích xuất frame (persistent)
 │
 ├── docs/
-│   ├── ARCHITECTURE.md          # Kiến trúc tổng thể (v3.0)
+│   ├── ARCHITECTURE.md          # Kiến trúc tổng thể (v4.0)
 │   ├── DATA_FLOW.md             # Luồng dữ liệu chi tiết
 │   ├── API.md                   # API specification
-│   └── DESIGN.md                # Thiết kế training manager
+│   └── DESIGN.md                # Thiết kế hệ thống
 │
 ├── src/
-│   ├── config.py                # Centralized configuration
-│   │                              (auto-detect ONNX / fallback PT)
-│   ├── recognizer.py            # Nhận diện real-time (FaceRecognizer)
-│   ├── training_manager.py      # CLI quản lý + thu thập (InteractiveCLI)
-│   ├── augment_dataset.py       # Augment 8 biến thể
-│   ├── optimize_encodings.py    # Clustering encodings
-│   ├── export_onnx.py           # Export YOLO .pt → .onnx [MỚI]
-│   ├── benchmark_models.py      # Benchmark YOLO models
+│   ├── face_manager.py          # ← chạy để cập nhật data / train lại
+│   ├── main.py                  # ← chạy để nhận diện real-time
+│   ├── config.py                # Tất cả tham số hệ thống (auto-detect ONNX/PT)
 │   │
-│   ├── core/
-│   │   ├── __init__.py
+│   ├── core/                    # Reusable — không chứa business logic
+│   │   ├── recognizer.py        # FaceRecognizer — camera loop + detection
+│   │   ├── encoder.py           # rebuild_encodings(), update_person_encodings()
 │   │   ├── face_utils.py        # extract_face_region()
-│   │   ├── encoder.py           # rebuild_encodings()
-│   │   └── frame_extractor.py   # VideoFrameExtractor, QualityChecker, DiversityFilter
+│   │   ├── frame_extractor.py   # VideoFrameExtractor + ExtractedFrame
+│   │   ├── frame_quality.py     # FrameQualityChecker (sharp/bright/size)
+│   │   ├── frame_diversity.py   # FrameDiversityFilter (SSIM dedup)
+│   │   ├── motion_guard.py      # MotionGuard — bỏ qua frame không có chuyển động
+│   │   └── recognition_stabilizer.py  # Anti-noise cho nhận diện real-time
+│   │
+│   ├── services/                # Smart home business logic
+│   │   ├── alert_manager.py     # Cảnh báo người lạ (Telegram, sound)
+│   │   ├── device_dispatcher.py # Điều khiển thiết bị (MQTT, Serial)
+│   │   ├── event_logger.py      # Ghi lịch sử vào nhà (JSONL)
+│   │   └── notification_worker.py  # Background thread xử lý I/O
+│   │
+│   ├── training/                # Training domain
+│   │   ├── cli.py               # InteractiveCLI — giao diện dòng lệnh
+│   │   ├── person_manager.py    # PersonManager — CRUD persons
+│   │   ├── data_collection.py   # DataCollectionSession — thu thập ảnh
+│   │   └── extraction_settings.py  # ExtractionSettings + presets
 │   │
 │   └── yolo/
 │       ├── yolov11n-face.pt     # Nano — default
 │       ├── yolov11n-face.onnx   # ONNX version — nhanh hơn ~1.5-2x [sau export]
 │       ├── yolov11s-face.pt     # Small — cân bằng
 │       └── yolov12s-face.pt     # v12 Small — chính xác nhất
+│
+├── scripts/                     # Maintenance tools (chạy độc lập)
+│   ├── augment_dataset.py       # Augment 8 biến thể ảnh
+│   ├── optimize_encodings.py    # Clustering — giảm encoding trùng lặp
+│   ├── export_onnx.py           # Export YOLO .pt → .onnx
+│   └── benchmark_models.py      # Benchmark các YOLO model
 │
 ├── model/
 │   └── face_encodings_hybrid.pkl # Face encodings database
@@ -320,8 +324,12 @@ ONNX Runtime nhanh hơn PyTorch ~1.5-2x trên CPU vì:
 ├── tests/
 │   ├── conftest.py              # Shared fixtures
 │   ├── test_frame_quality.py    # Unit: FrameQualityChecker
+│   ├── test_frame_extractor.py  # Unit: DiversityFilter, VideoFrameExtractor
 │   ├── test_person_manager.py   # Unit: PersonManager CRUD
-│   ├── test_frame_extractor.py  # Unit: DiversityFilter, Extractor
+│   ├── test_alert_manager.py    # Unit: AlertManager
+│   ├── test_device_dispatcher.py # Unit: DeviceDispatcher backends
+│   ├── test_event_logger.py     # Unit: EventLogger
+│   ├── test_stabilizer.py       # Unit: RecognitionStabilizer
 │   └── test_integration.py      # Integration: full pipeline
 │
 └── benchmark_results/            # Benchmark output images
@@ -385,17 +393,17 @@ Tất cả tham số tập trung trong `src/config.py`:
 ## Testing
 
 ```bash
-cd /home/dkhai/workspace
-pytest tests/ -v
+cd /home/ubuntu/workspace
+python -m pytest tests/ -v
 
 # Chạy cụ thể:
-pytest tests/test_frame_quality.py -v    # Unit: quality checker
-pytest tests/test_person_manager.py -v   # Unit: person CRUD
-pytest tests/test_frame_extractor.py -v  # Unit: diversity + extractor
-pytest tests/test_integration.py -v      # Integration: full pipeline
+python -m pytest tests/test_frame_quality.py -v    # Unit: quality checker
+python -m pytest tests/test_person_manager.py -v   # Unit: person CRUD
+python -m pytest tests/test_frame_extractor.py -v  # Unit: diversity + extractor
+python -m pytest tests/test_integration.py -v      # Integration: full pipeline
 ```
 
-**37 tests** covering:
+**40+ tests** covering:
 - Frame quality checks (sharpness, brightness, size)
 - Person CRUD operations
 - Frame diversity filtering (SSIM)
@@ -412,7 +420,7 @@ pytest tests/test_integration.py -v      # Integration: full pipeline
 | YOLO model không tìm thấy | Kiểm tra `src/yolo/*.pt` |
 | face_recognition import error | `pip install cmake dlib face_recognition` |
 | onnxruntime không tìm thấy | `pip install onnxruntime` |
-| ONNX chưa có, dùng PyTorch | Chạy `python src/export_onnx.py` |
+| ONNX chưa có, dùng PyTorch | Chạy `python scripts/export_onnx.py` |
 | Nhận diện không chính xác | Thêm ảnh training, giảm `TOLERANCE` |
 | Nhận diện chậm (CPU) | Chạy export_onnx.py, YOLO_INPUT_WIDTH=416 |
 | FPS thấp dù đã ONNX | Tăng `RECOGNITION_INTERVAL` lên 15 |

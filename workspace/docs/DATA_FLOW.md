@@ -1,7 +1,7 @@
 # Luồng Dữ Liệu — Family Face Recognition System
 
-**Phiên bản:** 2.0
-**Ngày:** 2026-03-29
+**Phiên bản:** 2.1
+**Ngày:** 2026-05-31
 
 ---
 
@@ -164,8 +164,10 @@ Camera              FaceRecognizer                   Display
  │                       │                         │    │
  │                       │   face_distance()       │    │
  │                       │   vs known_encodings    │    │
+ │                       │   Top-K weighted vote   │    │
+ │                       │   weight=(1-distance)   │    │
  │                       │                         │    │
- │                       │   min_dist ≤ 0.6?       │    │
+ │                       │   winner dist ≤ 0.5?    │    │
  │                       │    YES → "Name (conf)"  │    │
  │                       │    NO  → "Unknown"      │    │
  │                       │    empty → "No Data"    │    │
@@ -259,16 +261,17 @@ family_images/
 │      │                                │
 │      ├─ YOLO detect                   │
 │      │  └─ best box conf ≥ 0.5?      │
-│      │     YES → crop + pad           │
-│      │     └─ face_recognition        │
-│      │        .face_encodings(crop)   │
-│      │        → 128-d vector          │
+│      │     YES → bbox → known_face_  │
+│      │     locations → face_encodings│
+│      │     → 128-d vector            │
 │      │                                │
 │      └─ Fallback: face_recognition    │
 │         .face_encodings(full_img)     │
 │         → 128-d vector                │
 │                                       │
-│  Result: all_encodings[], all_names[] │
+│    _cluster_to_max(person_encs, 50)  │
+│    → giữ tối đa 50 encoding           │
+│      đa dạng nhất per person          │
 └──────────────────┬────────────────────┘
                    │
                    ▼
@@ -276,7 +279,7 @@ family_images/
 │  Backup old pkl → *_backup.pkl        │
 │  Save new pkl:                        │
 │  {                                    │
-│    "encodings": [ndarray × 120],      │
+│    "encodings": [ndarray × N],        │
 │    "names": ["Alice", "Bob", ...]     │
 │  }                                    │
 │  → model/face_encodings_hybrid.pkl    │
@@ -304,11 +307,11 @@ model/face_encodings_hybrid.pkl (120 encodings)
 │       dist[i][j] = face_distance()   │
 │                                       │
 │    4. Clustering:                     │
-│       if dist[i][j] < 0.15:          │
+│       if dist[i][j] < 0.25:          │
 │         → same cluster                │
 │       Select centroid representative  │
 │                                       │
-│    5. If still > 30 per person:       │
+│    5. If still > 50 per person:       │
 │       Quality-diverse sampling:       │
 │       sort by quality, pick evenly    │
 │       → giữ cả high + low quality     │
@@ -412,5 +415,5 @@ Format: mp4v codec, native camera resolution
 | `FRAME_MIN_LAPLACIAN` | 15 | Frame Extractor | Độ nét tối thiểu |
 | `FRAME_MIN_FACE_PX` | 70 | Frame Extractor | Kích thước mặt tối thiểu |
 | `FRAME_DETECT_CONF` | 0.15 | Frame Extractor | YOLO confidence (extract) |
-| `MAX_ENCODINGS_PER_PERSON` | 30 | Optimizer | Số encoding tối đa/person |
-| `CLUSTERING_THRESHOLD` | 0.15 | Optimizer | Ngưỡng distance clustering |
+| `MAX_ENCODINGS_PER_PERSON` | 50 | Encoder, Optimizer | Số encoding tối đa/person (tăng từ 30 → 50) |
+| `CLUSTERING_THRESHOLD` | 0.25 | Encoder, Optimizer | Ngưỡng distance clustering (tăng từ 0.15 → 0.25) |

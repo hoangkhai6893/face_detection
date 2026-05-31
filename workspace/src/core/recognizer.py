@@ -13,7 +13,7 @@ import queue
 import sys
 import threading
 from collections import deque
-from typing import List, Tuple, Optional
+from typing import Callable, List, Tuple, Optional
 
 import cv2
 import face_recognition
@@ -24,6 +24,7 @@ from ultralytics import YOLO
 
 import config
 from core.face_utils import extract_face_region
+from core.motion_guard import MotionGuard
 
 
 def setup_logging(verbose: bool = False) -> logging.Logger:
@@ -54,7 +55,11 @@ class FaceRecognizer:
         motion_absdiff_threshold: float = config.MOTION_ABSDIFF_THRESHOLD,
         motion_mog2_threshold: float = config.MOTION_MOG2_THRESHOLD,
         motion_max_idle_sec: float = config.MOTION_MAX_IDLE_SEC,
-        logger: Optional[logging.Logger] = None
+        recognition_top_k: int = config.RECOGNITION_TOP_K,
+        iou_cache_threshold: float = config.IOU_CACHE_THRESHOLD,
+        confusion_margin: float = config.CONFUSION_MARGIN,
+        logger: Optional[logging.Logger] = None,
+        on_recognition_update: Optional[Callable[[str, tuple, "np.ndarray"], None]] = None,
     ):
         """
         Initialize the face recognizer.
@@ -85,16 +90,25 @@ class FaceRecognizer:
         self.motion_absdiff_threshold = motion_absdiff_threshold
         self.motion_mog2_threshold    = motion_mog2_threshold
         self.motion_max_idle_sec      = motion_max_idle_sec
-        # MOG2: học background qua 500 frames (~33s ở 15fps), bỏ shadow detection để nhẹ hơn
-        self._mog2 = cv2.createBackgroundSubtractorMOG2(
-            history=500, varThreshold=16, detectShadows=False
-        )
+        self.recognition_top_k   = recognition_top_k
+        self.iou_cache_threshold = iou_cache_threshold
+        self.confusion_margin    = confusion_margin
         self.logger = logger or logging.getLogger(__name__)
+
+        self._motion_guard = MotionGuard(
+            absdiff_threshold=motion_absdiff_threshold,
+            mog2_threshold=motion_mog2_threshold,
+            max_idle_sec=motion_max_idle_sec,
+            logger=self.logger,
+        )
+        self.on_recognition_update = on_recognition_update
 
         self._validate_paths()
 
         self.logger.info(f"Loading YOLO model from: {model_path}")
         self.yolo_model = YOLO(model_path)
+        # One dummy inference to force JIT/ONNX graph compilation before the first real frame.
+        self.yolo_model(np.zeros((64, 64, 3), dtype=np.uint8), verbose=False)
 
         self.known_face_encodings: List[np.ndarray] = []
         self.known_face_names: List[str] = []
@@ -188,7 +202,11 @@ class FaceRecognizer:
         self._save_encodings(save_path)
 
     def _extract_face_encoding(self, image: np.ndarray) -> Optional[np.ndarray]:
-        """Extract face encoding from image using YOLO + face_recognition"""
+        """Extract face encoding from image using YOLO + face_recognition.
+
+        Passes the YOLO bbox directly to face_encodings() as a known location,
+        skipping dlib's HOG detection step — same approach as recognize_face_in_region().
+        """
         results = self.yolo_model(image, verbose=False)
 
         for result in results:
@@ -199,22 +217,24 @@ class FaceRecognizer:
 
                 if float(best_box.conf) > self.encoding_confidence:
                     x1, y1, x2, y2 = map(int, best_box.xyxy[0].cpu().numpy())
+                    h, w = image.shape[:2]
 
-                    face_image = extract_face_region(
-                        image, x1, y1, x2, y2, self.encoding_padding
-                    )
+                    # Build dlib-format location (top, right, bottom, left) from YOLO bbox.
+                    # Apply padding then clamp to image bounds.
+                    top    = max(0, y1 - self.encoding_padding)
+                    right  = min(w, x2 + self.encoding_padding)
+                    bottom = min(h, y2 + self.encoding_padding)
+                    left   = max(0, x1 - self.encoding_padding)
 
-                    if face_image is not None:
-                        try:
-                            rgb_face = cv2.cvtColor(face_image, cv2.COLOR_BGR2RGB)
-                            face_locations = face_recognition.face_locations(rgb_face, model="hog")
-
-                            if len(face_locations) > 0:
-                                face_encodings = face_recognition.face_encodings(rgb_face, face_locations)
-                                if len(face_encodings) > 0:
-                                    return face_encodings[0]
-                        except Exception:
-                            pass
+                    try:
+                        rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                        encodings = face_recognition.face_encodings(
+                            rgb_image, known_face_locations=[(top, right, bottom, left)]
+                        )
+                        if encodings:
+                            return encodings[0]
+                    except Exception:
+                        pass
 
         return self._fallback_extract_encoding(image)
 
@@ -281,13 +301,16 @@ class FaceRecognizer:
         """Return cached name if this face was recognized recently at the same position."""
         for entry in self._face_cache:
             if (self._frame_count - entry['frame'] <= self.recognition_interval and
-                    self._iou(bbox, entry['bbox']) > 0.4):
+                    self._iou(bbox, entry['bbox']) > self.iou_cache_threshold):
                 return entry['name']
         return None
 
     def _update_cache(self, bbox: Tuple, name: str):
         """Store recognition result for this face position."""
-        self._face_cache = [e for e in self._face_cache if self._iou(bbox, e['bbox']) <= 0.4]
+        self._face_cache = [
+            e for e in self._face_cache
+            if self._iou(bbox, e['bbox']) <= self.iou_cache_threshold
+        ]
         self._face_cache.append({'bbox': bbox, 'name': name, 'frame': self._frame_count})
 
     def recognize_face_in_region(
@@ -331,13 +354,39 @@ class FaceRecognizer:
                     self.known_face_encodings,
                     face_encoding
                 )
-                min_distance = np.min(distances)
 
-                if min_distance <= self.tolerance:
-                    best_match_index = np.argmin(distances)
-                    name = self.known_face_names[best_match_index]
-                    confidence = 1 - min_distance
-                    return f"{name} ({confidence:.2f})"
+                # Top-K weighted voting: lấy K encoding gần nhất trong ngưỡng tolerance,
+                # weight = (1 - distance) để encoding gần hơn có ảnh hưởng lớn hơn.
+                k = min(self.recognition_top_k, len(distances))
+                top_k_idx = np.argsort(distances)[:k]
+
+                votes: dict = {}
+                for idx in top_k_idx:
+                    if distances[idx] <= self.tolerance:
+                        person = self.known_face_names[idx]
+                        weight = 1.0 - distances[idx]
+                        votes[person] = votes.get(person, 0.0) + weight
+
+                if votes:
+                    winner = max(votes, key=lambda p: votes[p])
+                    best_dist = min(
+                        distances[i] for i in top_k_idx
+                        if self.known_face_names[i] == winner
+                    )
+
+                    # Margin guard: nếu người thứ 2 quá gần → không đủ tự tin phân biệt
+                    # (quan trọng với người thân/bạn bè có embedding gần nhau)
+                    if len(set(self.known_face_names)) > 1:
+                        second_best_dist = min(
+                            (distances[i] for i, name in enumerate(self.known_face_names)
+                             if name != winner),
+                            default=float('inf')
+                        )
+                        if second_best_dist - best_dist < self.confusion_margin:
+                            return "Unknown"
+
+                    confidence = 1.0 - best_dist
+                    return f"{winner} ({confidence:.2f})"
                 else:
                     return "Unknown"
             else:
@@ -423,11 +472,8 @@ class FaceRecognizer:
         if self.yolo_input_width and self.yolo_input_width < frame_width:
             yolo_scale = self.yolo_input_width / frame_width
 
-        # Motion gate state
-        _prev_gray:               Optional[np.ndarray]               = None
-        _last_face_detections:    List[Tuple[int, int, int, int, float]] = []
-        _last_recognition_results: List[str]                          = []
-        _last_yolo_time:          float                               = time.time()
+        _last_face_detections:     List[Tuple[int, int, int, int, float]] = []
+        _last_recognition_results: List[str]                               = []
 
         try:
             while True:
@@ -440,26 +486,10 @@ class FaceRecognizer:
 
                 self._frame_count += 1
 
-                # --- Motion gate (~0.6ms): quyết định có chạy YOLO không ---
-                _motion_small = cv2.resize(frame, (160, 90))
-                _curr_gray    = cv2.cvtColor(_motion_small, cv2.COLOR_BGR2GRAY)
-
-                # absdiff: kiểm tra nhanh "có gì thay đổi không?" (~0.1ms)
-                if _prev_gray is not None:
-                    _absdiff_score = float(cv2.absdiff(_prev_gray, _curr_gray).mean())
-                else:
-                    _absdiff_score = 255.0  # frame đầu tiên: luôn xử lý
-                _prev_gray = _curr_gray
-
-                _idle_too_long = (time.time() - _last_yolo_time) > self.motion_max_idle_sec
-
-                if _absdiff_score >= self.motion_absdiff_threshold or _idle_too_long:
-                    # MOG2: xác nhận người thật hay chỉ thay đổi ánh sáng (~0.5ms)
-                    _mog2_mask  = self._mog2.apply(_curr_gray)
-                    _mog2_score = float(_mog2_mask.mean()) / 2.55  # normalize 0–100
-                    _should_run = _mog2_score >= self.motion_mog2_threshold or _idle_too_long
-                else:
-                    _should_run = False
+                # --- State machine (IDLE/ACTIVE) ---
+                # IDLE: chỉ check motion mỗi N frame → ~2% CPU
+                # ACTIVE: chạy full pipeline mỗi frame
+                _should_run = self._motion_guard.should_process(frame)
 
                 if _should_run:
                     # --- YOLO detection on a downscaled frame ---
@@ -475,6 +505,9 @@ class FaceRecognizer:
                     else:
                         face_detections = self.detect_faces_yolo(frame)
 
+                    # Báo cho MotionGuard biết có bao nhiêu mặt → quyết định về IDLE
+                    self._motion_guard.report_faces(len(face_detections))
+
                     # Convert BGR→RGB once per active frame (not once per face)
                     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
@@ -489,20 +522,24 @@ class FaceRecognizer:
                         bbox = (x1, y1, x2, y2)
                         cached = self._get_cached_name(bbox)
                         if cached is not None:
-                            # Face was recognized recently — reuse result
                             recognition_results.append(cached)
                         else:
-                            # New face or cache expired — run full recognition
                             name = self.recognize_face_in_region(rgb_frame, x1, y1, x2, y2)
                             self._update_cache(bbox, name)
                             recognition_results.append(name)
+                            # Fire raw callback BEFORE draw_results() modifies frame in-place.
+                            # frame.copy() ensures the snapshot is clean (no bounding boxes).
+                            if self.on_recognition_update is not None:
+                                try:
+                                    self.on_recognition_update(name, bbox, frame.copy())
+                                except Exception as _cb_err:
+                                    self.logger.debug("on_recognition_update error: %s", _cb_err)
 
-                    _last_yolo_time          = time.time()
-                    _last_face_detections    = face_detections
+                    _last_face_detections     = face_detections
                     _last_recognition_results = recognition_results
                 else:
-                    # Static scene: tái dùng toàn bộ kết quả cũ — không chạy YOLO, BGR→RGB, hay dlib
-                    face_detections    = _last_face_detections
+                    # IDLE hoặc skip frame: tái dùng kết quả cũ — không chạy YOLO hay dlib
+                    face_detections     = _last_face_detections
                     recognition_results = _last_recognition_results
 
                 if face_detections and recognition_results:
@@ -514,9 +551,10 @@ class FaceRecognizer:
                 avg_time = np.mean(self.detection_times)
                 fps = 1.0 / avg_time if avg_time > 0 else 0
 
-                _indicator = "M" if _should_run else "-"
+                _state_label = self._motion_guard.state.name   # "IDLE" hoặc "ACTIVE"
+                _indicator   = "A" if _should_run else "I"
                 info_text = [
-                    f"FPS: {fps:.1f} [{_indicator}]",
+                    f"FPS: {fps:.1f} [{_state_label}|{_indicator}]",
                     f"Faces: {len(face_detections)}",
                     f"Known: {self._unique_person_count} people",
                     f"Encodings: {len(self.known_face_encodings)}"

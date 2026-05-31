@@ -1,5 +1,5 @@
 {
-  "min_laplacian": 15,
+  "min_laplacian": 15.0,
   "min_face_px": 70,
   "detect_conf": 0.15,
   "ssim_threshold": 0.85,

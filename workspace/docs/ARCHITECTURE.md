@@ -1,7 +1,7 @@
 # Kiến Trúc Hệ Thống — Family Face Recognition
 
-**Phiên bản:** 3.0
-**Ngày cập nhật:** 2026-04-05
+**Phiên bản:** 4.1
+**Ngày cập nhật:** 2026-05-31
 
 ---
 
@@ -11,67 +11,59 @@ Hệ thống nhận diện khuôn mặt gia đình kết hợp **YOLO** (face de
 
 | Quy trình | Entry Point | Mô tả |
 |-----------|-------------|-------|
-| **Nhận diện real-time** | `src/recognizer.py` | Camera → detect → identify → hiển thị |
-| **Thu thập dữ liệu** | `src/training_manager.py` | Camera/Video → frame selection → lưu ảnh |
-| **Augment dataset** | `src/augment_dataset.py` | Ảnh gốc → 8 biến thể → tăng dataset |
-| **Tối ưu encodings** | `src/optimize_encodings.py` | Clustering → giảm encoding trùng lặp |
-| **Export ONNX** | `src/export_onnx.py` | YOLO .pt → .onnx (tăng tốc CPU ~1.5-2x) |
+| **Nhận diện real-time** | `src/main.py` | Camera → detect → identify → hiển thị |
+| **Thu thập dữ liệu** | `src/face_manager.py` | Camera/Video → frame selection → lưu ảnh |
+| **Augment dataset** | `scripts/augment_dataset.py` | Ảnh gốc → 8 biến thể → tăng dataset |
+| **Tối ưu encodings** | `scripts/optimize_encodings.py` | Clustering → giảm encoding trùng lặp |
+| **Export ONNX** | `scripts/export_onnx.py` | YOLO .pt → .onnx (tăng tốc CPU ~1.5-2x) |
 
 ---
 
 ## 2. Sơ Đồ Kiến Trúc Tổng Thể
 
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                          INTERACTIVE CLI                                │
-│                     training_manager.py (Entry Point)                   │
-│                                                                         │
-│   ┌─────────────┐  ┌──────────────────┐  ┌───────────────────────┐     │
-│   │ PersonManager│  │DataCollectionSession│ │  ExtractionSettings   │     │
-│   │ CRUD persons │  │ run_from_file()  │  │  Presets / tuning     │     │
-│   │              │  │ run_from_camera()│  │  → extraction_settings│     │
-│   └─────────────┘  └───────┬──────────┘  └───────────────────────┘     │
-│                            │                                            │
-│   ┌─────────────┐  ┌──────▼──────────────────────────────────────┐     │
-│   │ augment_    │  │          VideoFrameExtractor                 │     │
-│   │ dataset.py  │  │                                             │     │
-│   │ (8 biến thể)│  │  ┌──────────────────┐  ┌────────────────┐  │     │
-│   └─────────────┘  │  │FrameQualityChecker│  │FrameDiversity  │  │     │
-│                     │  │ - is_sharp()     │  │Filter          │  │     │
-│   ┌─────────────┐  │  │ - is_bright()    │  │ - SSIM dedup   │  │     │
-│   │ optimize_   │  │  │ - is_large()     │  │ - frame gap    │  │     │
-│   │ encodings.py│  │  │ - score()        │  └────────────────┘  │     │
-│   │ (clustering)│  │  └──────────────────┘                       │     │
-│   └─────────────┘  └─────────────────────────────────────────────┘     │
-│                                                                         │
-│   ┌─────────────────────────────────────────────────────────────┐       │
-│   │ export_onnx.py                                              │       │
-│   │ YOLO .pt → .onnx (chạy 1 lần, dùng ONNX Runtime sau đó)   │       │
-│   └─────────────────────────────────────────────────────────────┘       │
-└─────────────────────────────────────────────────────────────────────────┘
-         │                          │
-         ▼                          ▼
-┌──────────────────┐    ┌──────────────────────────┐
-│   RECOGNIZER     │    │      DATA STORES          │
-│ recognizer.py    │    │                           │
-│                  │    │ family_images/<Person>/    │
-│ YOLO detect      │    │ ├── img_001_q0.85.jpg    │
-│ → face crop      │    │ └── img_002_aug_blur.jpg │
-│ → 128d encoding  │    │                           │
-│ → match DB       │    │ model/                    │
-│ → label + bbox   │    │ └── face_encodings_       │
-│                  │    │     hybrid.pkl             │
-└──────────────────┘    └──────────────────────────┘
-         │
-         ▼
-┌──────────────────────────────────────────┐
-│              CORE UTILITIES              │
-│  src/core/                               │
-│                                          │
-│  face_utils.py    — crop face region     │
-│  encoder.py       — rebuild encodings    │
-│  frame_extractor.py — video extraction   │
-└──────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│                         ENTRY POINTS                                 │
+│                                                                      │
+│   src/face_manager.py              src/main.py                      │
+│   (cập nhật data, train lại)       (nhận diện real-time)            │
+└──────────────────┬──────────────────────────┬───────────────────────┘
+                   │                          │
+        ┌──────────▼───────┐      ┌───────────▼──────────────────┐
+        │  src/training/   │      │       src/services/           │
+        │                  │      │                               │
+        │ InteractiveCLI   │      │ AlertManager (Telegram)       │
+        │ PersonManager    │      │ DeviceDispatcher (MQTT/Serial)│
+        │ DataCollection   │      │ EventLogger (JSONL)           │
+        │ ExtractionSettings│     │ NotificationWorker (thread)   │
+        └──────────┬───────┘      └───────────┬──────────────────┘
+                   │                          │
+                   └──────────┬───────────────┘
+                              │
+        ┌─────────────────────▼────────────────────────────────┐
+        │                   src/core/                          │
+        │                                                      │
+        │  recognizer.py         — FaceRecognizer              │
+        │  encoder.py            — rebuild_encodings()         │
+        │  face_utils.py         — extract_face_region()       │
+        │  frame_extractor.py    — VideoFrameExtractor         │
+        │  frame_quality.py      — FrameQualityChecker         │
+        │  frame_diversity.py    — FrameDiversityFilter        │
+        │  motion_guard.py       — MotionGuard                 │
+        │  recognition_stabilizer.py — anti-noise filter       │
+        └──────────────────────────────────────────────────────┘
+                              │
+        ┌─────────────────────▼────────────────────────────────┐
+        │                  DATA STORES                         │
+        │                                                      │
+        │  family_images/<Person>/   — ảnh training            │
+        │  model/face_encodings_hybrid.pkl — encodings DB      │
+        │  src/yolo/*.pt / *.onnx    — YOLO models             │
+        └──────────────────────────────────────────────────────┘
+
+scripts/ (maintenance tools — chạy độc lập)
+  augment_dataset.py    optimize_encodings.py
+  export_onnx.py        benchmark_models.py
 ```
 
 ---
@@ -82,29 +74,46 @@ Hệ thống nhận diện khuôn mặt gia đình kết hợp **YOLO** (face de
 
 | Module | Class / Function | Trách nhiệm |
 |--------|-----------------|-------------|
+| `recognizer.py` | `FaceRecognizer` | Nhận diện real-time: camera → YOLO detect → encode → match |
 | `face_utils.py` | `extract_face_region()` | Crop vùng mặt từ frame với padding, clamp biên |
 | `encoder.py` | `rebuild_encodings()` | Đọc toàn bộ dataset → YOLO detect → face_recognition encode → lưu .pkl |
-| `frame_extractor.py` | `FrameQualityChecker` | Đánh giá chất lượng frame: độ nét, độ sáng, kích thước |
-| `frame_extractor.py` | `FrameDiversityFilter` | Lọc frame trùng lặp bằng SSIM + khoảng cách temporal |
-| `frame_extractor.py` | `VideoFrameExtractor` | Pipeline chính: đọc video → detect → filter → yield frame |
-| `frame_extractor.py` | `ExtractedFrame` | Dataclass chứa face_crop, quality_score, metadata |
+| `frame_extractor.py` | `VideoFrameExtractor`, `ExtractedFrame` | Pipeline chính: đọc video → detect → filter → yield frame |
+| `frame_quality.py` | `FrameQualityChecker` | Đánh giá chất lượng frame: độ nét, độ sáng, kích thước |
+| `frame_diversity.py` | `FrameDiversityFilter` | Lọc frame trùng lặp bằng SSIM + khoảng cách temporal |
+| `motion_guard.py` | `MotionGuard` | State machine IDLE/ACTIVE — tiết kiệm CPU khi vắng người, probe burst khi timeout |
+| `recognition_stabilizer.py` | `RecognitionStabilizer` | Anti-noise: chống nhận diện giật/nhiễu real-time |
 
-### 3.2 Application Layer (`src/`)
+### 3.2 Services Layer (`src/services/`)
 
-| Module | Class / Function | Trách nhiệm |
-|--------|-----------------|-------------|
-| `config.py` | Constants | Toàn bộ tham số hệ thống (paths, thresholds, parameters) |
-| `recognizer.py` | `FaceRecognizer` | Nhận diện real-time: camera → YOLO detect → encode → match |
-| `training_manager.py` | `InteractiveCLI` | Giao diện dòng lệnh tương tác (questionary) |
-| `training_manager.py` | `PersonManager` | CRUD người: tạo, xem, xóa, reset person folders |
-| `training_manager.py` | `DataCollectionSession` | Phiên thu thập: từ camera hoặc video file |
-| `training_manager.py` | `ExtractionSettings` | Quản lý presets và tuning tham số trích xuất |
+| Module | Class | Trách nhiệm |
+|--------|-------|-------------|
+| `alert_manager.py` | `AlertManager` | Cảnh báo người lạ: Telegram photo + beep |
+| `device_dispatcher.py` | `DeviceDispatcher` | Kích hoạt thiết bị khi nhận diện thành viên (MQTT, Serial, Webhook, Log) |
+| `event_logger.py` | `EventLogger` | Ghi lịch sử vào nhà ra file JSONL |
+| `notification_worker.py` | `NotificationWorker` | Background thread xử lý I/O — camera loop không bị block |
+
+### 3.3 Training Layer (`src/training/`)
+
+| Module | Class | Trách nhiệm |
+|--------|-------|-------------|
+| `cli.py` | `InteractiveCLI` | Giao diện dòng lệnh tương tác (questionary) |
+| `person_manager.py` | `PersonManager` | CRUD người: tạo, xem, xóa, reset person folders |
+| `data_collection.py` | `DataCollectionSession` | Phiên thu thập: từ camera hoặc video file |
+| `extraction_settings.py` | `ExtractionSettings` | Quản lý presets và tuning tham số trích xuất |
+
+### 3.4 Application Layer (`src/`)
+
+| Module | Trách nhiệm |
+|--------|-------------|
+| `config.py` | Toàn bộ tham số hệ thống (paths, thresholds, parameters) |
+| `main.py` | Entry point nhận diện real-time — wires FaceRecognizer + services |
+| `face_manager.py` | Entry point training — gọi `training.cli.main()` |
 | `augment_dataset.py` | `augment_person()` | Tạo 8 biến thể ảnh (blur, dark, noise, ...) |
 | `optimize_encodings.py` | `FaceEncodingOptimizer` | Clustering encodings, giảm số lượng, benchmark |
 | `export_onnx.py` | `export_to_onnx()` | Export YOLO .pt sang .onnx, benchmark tốc độ |
 | `benchmark_models.py` | `run_model()` | Benchmark các YOLO model trên video |
 
-### 3.3 Data Layer
+### 3.5 Data Layer
 
 | Path | Format | Nội dung |
 |------|--------|----------|
@@ -114,12 +123,12 @@ Hệ thống nhận diện khuôn mặt gia đình kết hợp **YOLO** (face de
 | `data/*.mp4` | MP4 | Video raw recordings |
 | `extraction_settings.json` | JSON | Persistent extraction parameters |
 
-### 3.4 Models
+### 3.6 Models
 
 | File | Kích thước | Đặc điểm | Ghi chú |
 |------|-----------|-----------|---------|
 | `yolov11n-face.pt` | ~5 MB | Nhanh nhất, phù hợp real-time | Default |
-| `yolov11n-face.onnx` | ~10 MB | ONNX version — nhanh hơn ~1.5-2x trên CPU | Tạo bằng export_onnx.py |
+| `yolov11n-face.onnx` | ~10 MB | ONNX version — nhanh hơn ~1.5-2x trên CPU | Tạo bằng `scripts/export_onnx.py` |
 | `yolov11s-face.pt` | ~20 MB | Cân bằng tốc độ/độ chính xác | Dùng khi cần accuracy cao hơn |
 | `yolov12s-face.pt` | ~20 MB | Mới nhất, chính xác nhất | Chậm hơn, dùng offline |
 
@@ -174,14 +183,15 @@ Camera Frame (1280×720)
 ┌───────────────────────┐
 │   face_recognition    │  Dùng YOLO bbox làm known_face_locations
 │   .face_encodings()   │  → skip HOG detection của dlib (~30-50% faster)
-│   → 128-d vector      │  ~20-50ms/khuôn mặt (CPU, dlib CNN)
+│   → 128-d vector      │  ~20-50ms/khuôn mặt (CPU, dlib)
 └───────────┬───────────┘
             │
             ▼
 ┌───────────────────────┐
 │   Matching             │
 │   face_distance()      │  NumPy vectorized vs known_encodings
-│   tolerance = 0.6      │  distance ≤ 0.6 → KNOWN
+│   Top-K weighted vote  │  weight = (1 - distance) per encoding
+│   tolerance = 0.5      │  distance ≤ 0.5 → tính vào vote
 └───────────┬───────────┘
             │
             ▼
@@ -205,7 +215,7 @@ Camera Frame (1280×720)
 | `RECOGNITION_INTERVAL` | **10** | Re-encode mỗi 10 frames — giảm 50% lần gọi dlib |
 | `DETECTION_CONFIDENCE` | 0.3 | Ngưỡng confidence tối thiểu (thấp = bắt mặt xa hơn) |
 | `RECOGNITION_PADDING` | 15px | Padding quanh bbox khi encode |
-| `TOLERANCE` | 0.6 | Ngưỡng matching (thấp hơn = strict hơn) |
+| `TOLERANCE` | 0.5 | Ngưỡng matching (thấp hơn = strict hơn) |
 
 ### 4.3 Hiệu suất ước tính (CPU, không GPU)
 
@@ -214,6 +224,72 @@ Camera Frame (1280×720)
 | PyTorch + 640px + interval=5 (cũ) | ~10-17 FPS |
 | ONNX + 416px + interval=10 (mới) | ~22-30 FPS |
 | Gain | **+50-80%** |
+
+### 4.4 MotionGuard — State Machine IDLE/ACTIVE
+
+Camera chạy 24/7 nhưng không phải lúc nào cũng có người. MotionGuard giảm CPU xuống gần 0 khi không có ai, đồng thời đảm bảo phát hiện đột nhập ngay khi có người vào.
+
+#### Sơ đồ state machine
+
+```
+                    ┌──────────────────────────────────────────┐
+                    │                  IDLE                    │
+                    │  - check motion mỗi 6 frame (~0.6ms)    │
+                    │  - CPU ~2%                               │
+                    └──────────┬───────────────────────────────┘
+                               │
+           ┌───────────────────┼──────────────────────┐
+           │                   │                      │
+     motion detected     probe thấy mặt        probe 5 frame
+     (trong 0.2 giây)    (trong 60 giây)       không thấy mặt
+           │                   │                      │
+           ▼                   ▼                      ▼
+      ┌─────────┐         ┌─────────┐           reset timer
+      │ ACTIVE  │         │ ACTIVE  │           vẫn IDLE
+      │ YOLO+   │         │ YOLO+   │
+      │ dlib    │         │ dlib    │
+      │ CPU~50% │         │ CPU~50% │
+      └────┬────┘         └────┬────┘
+           │                   │
+      không mặt 150 frame  không mặt 150 frame
+           └──────────┬────────┘
+                      ▼
+                    IDLE
+```
+
+#### Ba trigger chuyển sang ACTIVE
+
+| Trigger | Thời gian phát hiện | Kịch bản |
+|---------|-------------------|---------|
+| **Motion detected** | < 0.2s (6 frame) | Người đi vào bình thường |
+| **Probe thấy mặt** | ≤ 60s | Người đứng yên hoàn toàn |
+| *(không có)* | — | Không có ai, tiết kiệm CPU |
+
+#### Probe burst — tránh bỏ sót mặt
+
+Khi timeout 60s, hệ thống chạy **5 frame YOLO liên tiếp** (không throttle, không đổi state).
+Nếu bất kỳ frame nào thấy mặt → lên ACTIVE. Nếu cả 5 frame không thấy → reset timer, vẫn IDLE.
+
+> **Tại sao 5 frame?** YOLO có thể bỏ sót mặt nghiêng/tối trong 1 frame đơn lẻ. 5 frame liên tiếp (~0.17s) tăng độ tin cậy detection đáng kể mà chi phí CPU không đáng kể.
+
+#### Tham số liên quan (config.py)
+
+| Tham số | Giá trị | Ý nghĩa |
+|---------|---------|--------|
+| `IDLE_SAMPLE_EVERY` | 6 | Check motion mỗi 6 frame khi IDLE |
+| `IDLE_NO_FACE_FRAMES` | 150 | ACTIVE → IDLE sau 150 frame (~5s) không thấy mặt |
+| `MOTION_MAX_IDLE_SEC` | 60 | Thời gian IDLE tối đa trước khi probe |
+| `IDLE_PROBE_BURST` | 5 | Số frame YOLO chạy liên tiếp khi probe |
+| `MOTION_ABSDIFF_THRESHOLD` | 8 | Ngưỡng absdiff phát hiện chuyển động |
+| `MOTION_MOG2_THRESHOLD` | 5 | Ngưỡng MOG2 xác nhận motion thật (không phải ánh sáng) |
+
+#### So sánh CPU trước và sau
+
+| Tình huống | Trước | Sau |
+|-----------|-------|-----|
+| Không có ai (24h) | Loop ACTIVE↔IDLE mỗi 15s — full pipeline 33% thời gian | Probe 5 frame mỗi 60s — gần như 0% |
+| Có người di chuyển | ACTIVE ngay khi có motion | Không đổi |
+| Có người đứng yên | ACTIVE sau 10s | ACTIVE sau tối đa 60s |
 
 ---
 
@@ -291,11 +367,19 @@ family_images/
 │  For each image (.jpg/.png):     │
 │    1. cv2.imread()               │
 │    2. YOLO detect → best box     │
-│       ├─ conf ≥ 0.5 → crop+enc  │
+│       ├─ conf ≥ 0.5 → truyền    │
+│       │   bbox làm               │
+│       │   known_face_locations   │
+│       │   → face_encodings()     │
 │       └─ conf < 0.5 → fallback  │
 │           face_recognition full  │
 │    3. → 128-d vector             │
-│    4. Append to list             │
+│    4. Append to person_encs[]    │
+│                                  │
+│  _cluster_to_max(person_encs,    │
+│    MAX_ENCODINGS_PER_PERSON=50)  │
+│  → giữ tối đa 50 encoding        │
+│    đa dạng nhất per person       │
 └──────────────┬───────────────────┘
                │
                ▼
@@ -327,17 +411,19 @@ face_encodings_hybrid.pkl (200-400 encodings)
 │     O(n²) — chỉ chạy offline    │
 │                                  │
 │  3. Clustering:                  │
-│     distance < 0.15 → same group │
+│     distance < 0.25 → same group │
 │                                  │
 │  4. Select representative:       │
 │     closest to centroid          │
 │                                  │
-│  5. If > 30 per person:          │
-│     quality-diverse sampling     │
+│  5. If still > 50 per person:    │
+│     quality-diverse sampling:    │
+│     sort by quality, pick evenly │
+│     → giữ cả high + low quality  │
 └──────────────┬───────────────────┘
                │
                ▼
-face_encodings_hybrid.pkl (50-90 encodings)
+face_encodings_hybrid.pkl (50-150 encodings)
    ~3-5x faster recognition
    Giữ diversity: high-quality + adverse-condition
 ```

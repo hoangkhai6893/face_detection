@@ -5,7 +5,7 @@ Unit tests for PersonManager (CRUD operations).
 import cv2
 import pytest
 
-from training_manager import PersonManager
+from training.person_manager import PersonManager
 
 
 @pytest.fixture

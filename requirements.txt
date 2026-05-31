@@ -8,3 +8,9 @@ deepface
 tf-keras
 scikit-learn
 opencv-python-headless
+paho-mqtt
+requests
+onnxruntime
+scikit-image 
+questionary
+pytest

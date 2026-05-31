@@ -1,20 +1,17 @@
 #!/bin/bash
-set -e
-DEFAULT_USER_ID=1000
+set -euo pipefail
 
-if [-v USER_ID] && ["$USER_ID" != "$DEFAULT_USER_ID"  ]; then
-    echo "change docker user id to mactch to host's user id ($USER_ID) "
+USER_NAME="${USER_NAME:-ubuntu}"
+WORKDIR="/home/${USER_NAME}/workspace"
 
-    usermod --uid $USER_ID dkhai
-    # all files in the home dir are owned by the new user ID
-    find /home/dkhai -user $DEFAULT_USER_ID -exec chown -h $USER_ID {} \;
-fi
-cd /home/dkhai
 
-# In case no command is provided, set bash to start interractive shell
-if [ -z "$1"]; then
-    set - "/bin/bash" -l
+if [ -d "$WORKDIR" ]; then
+    cd "$WORKDIR"
 fi
 
-#run the provided command using user docker user
+# If no command is provided, keep the container alive for Dev Containers.
+if [ "$#" -eq 0 ]; then
+    set -- sleep infinity
+fi
+
 exec "$@"

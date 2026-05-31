@@ -12,16 +12,11 @@ import cv2
 import numpy as np
 import pytest
 
-from core.frame_extractor import (
-    FrameDiversityFilter,
-    FrameQualityChecker,
-    VideoFrameExtractor,
-)
-from training_manager import (
-    CollectionResult,
-    DataCollectionSession,
-    PersonManager,
-)
+from core.frame_extractor import VideoFrameExtractor
+from core.frame_quality import FrameQualityChecker
+from core.frame_diversity import FrameDiversityFilter
+from training.person_manager import PersonManager
+from training.data_collection import DataCollectionSession, CollectionResult
 
 
 # ---------------------------------------------------------------------------
@@ -60,7 +55,7 @@ class TestFullVideoCollection:
         extractor = _make_extractor(synthetic_face_image)
 
         # Patch rebuild_encodings so we don't need real YOLO/models
-        with patch("training_manager.rebuild_encodings", return_value=(0, 0)):
+        with patch("training.data_collection.rebuild_encodings", return_value=(0, 0)):
             session = DataCollectionSession(
                 person_name="Alice",
                 extractor=extractor,
@@ -74,7 +69,7 @@ class TestFullVideoCollection:
 
     def test_collection_result_fields_valid(self, tmp_dataset, synthetic_video, synthetic_face_image):
         extractor = _make_extractor(synthetic_face_image)
-        with patch("training_manager.rebuild_encodings", return_value=(0, 0)):
+        with patch("training.data_collection.rebuild_encodings", return_value=(0, 0)):
             session = DataCollectionSession("Alice", extractor, str(tmp_dataset))
             result = session.run_from_file(str(synthetic_video), max_frames=5)
 
@@ -94,7 +89,7 @@ class TestPersonCreateThenCollect:
         assert mgr.exists("NewPerson")
 
         extractor = _make_extractor(synthetic_face_image)
-        with patch("training_manager.rebuild_encodings", return_value=(0, 0)):
+        with patch("training.data_collection.rebuild_encodings", return_value=(0, 0)):
             session = DataCollectionSession("NewPerson", extractor, str(tmp_path))
             result = session.run_from_file(str(synthetic_video), max_frames=5)
 
@@ -129,7 +124,7 @@ class TestFilenameConvention:
         """Saved filenames must match <person>_<timestamp_ms>_q<score>.jpg"""
         import re
         extractor = _make_extractor(synthetic_face_image)
-        with patch("training_manager.rebuild_encodings", return_value=(0, 0)):
+        with patch("training.data_collection.rebuild_encodings", return_value=(0, 0)):
             session = DataCollectionSession("Alice", extractor, str(tmp_dataset))
             session.run_from_file(str(synthetic_video), max_frames=3)
 
