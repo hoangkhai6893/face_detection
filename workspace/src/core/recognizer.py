@@ -1,41 +1,73 @@
 #!/usr/bin/env python3
 """
-Face Recognition System
-- Uses YOLO for robust face detection (handles distant faces better)
-- Uses face_recognition library for identification with error handling
-- Optimized for speed and accuracy with configurable parameters
+Face Recognition System — pluggable detector/embedder backends.
+
+Backends (FACE_BACKEND env or --face-backend arg):
+  "dlib"  — YOLO + face_recognition (default, current stack)
+  "sface" — YuNet + SFace (Phase 3, OpenCV-native, lighter on ARM)
+
+Phase 1 features:
+  --headless / HEADLESS=true   → no cv2.imshow (required for Pi headless)
+  ACTIVE_PROCESS_EVERY         → skip frames when ACTIVE (reduce CPU)
+  HOG fallback WARNING + count → visibility into slow fallback path
+  Health log thread            → hourly FPS / state / face count report
 """
 
 import argparse
 import logging
 import os
+import pickle
 import queue
 import sys
 import threading
+import time
 from collections import deque
-from typing import Callable, List, Tuple, Optional
+from typing import Callable, List, Optional, Tuple
 
 import cv2
-import face_recognition
 import numpy as np
-import pickle
-import time
-from ultralytics import YOLO
 
 import config
-from core.face_utils import extract_face_region
+from core.detector import FaceDetection, FaceDetector
+from core.embedder import FaceEmbedder
 from core.motion_guard import MotionGuard
 
 
 def setup_logging(verbose: bool = False) -> logging.Logger:
-    """Setup logging configuration"""
     level = logging.DEBUG if verbose else logging.INFO
     logging.basicConfig(
         level=level,
-        format='%(asctime)s - %(levelname)s - %(message)s',
-        datefmt='%H:%M:%S'
+        format="%(asctime)s - %(levelname)s - %(message)s",
+        datefmt="%H:%M:%S",
     )
     return logging.getLogger(__name__)
+
+
+def _build_backends(
+    backend: str,
+    model_path: str,
+    detection_confidence: float,
+    yolo_input_width: int,
+) -> Tuple[FaceDetector, FaceEmbedder]:
+    """Factory: instantiate (detector, embedder) pair for the requested backend."""
+    if backend == "sface":
+        from core.detector import YuNetDetector
+        from core.embedder import SFaceEmbedder
+        detector: FaceDetector = YuNetDetector(
+            model_path=config.YUNET_MODEL_PATH,
+            detection_confidence=detection_confidence,
+        )
+        embedder: FaceEmbedder = SFaceEmbedder(model_path=config.SFACE_MODEL_PATH)
+    else:
+        from core.detector import YoloDetector
+        from core.embedder import DlibEmbedder
+        detector = YoloDetector(
+            model_path=model_path,
+            detection_confidence=detection_confidence,
+            input_width=yolo_input_width,
+        )
+        embedder = DlibEmbedder()
+    return detector, embedder
 
 
 class FaceRecognizer:
@@ -43,12 +75,12 @@ class FaceRecognizer:
         self,
         dataset_path: str,
         model_path: str,
-        tolerance: float = 0.6,
-        detection_confidence: float = 0.3,
-        encoding_confidence: float = 0.5,
-        padding: int = 15,
-        encoding_padding: int = 20,
-        max_fps_samples: int = 30,
+        tolerance: float = config.TOLERANCE,
+        detection_confidence: float = config.DETECTION_CONFIDENCE,
+        encoding_confidence: float = config.ENCODING_CONFIDENCE,
+        padding: int = config.RECOGNITION_PADDING,
+        encoding_padding: int = config.ENCODING_PADDING,
+        max_fps_samples: int = config.MAX_FPS_SAMPLES,
         encodings_file: Optional[str] = None,
         recognition_interval: int = config.RECOGNITION_INTERVAL,
         yolo_input_width: int = config.YOLO_INPUT_WIDTH,
@@ -58,42 +90,34 @@ class FaceRecognizer:
         recognition_top_k: int = config.RECOGNITION_TOP_K,
         iou_cache_threshold: float = config.IOU_CACHE_THRESHOLD,
         confusion_margin: float = config.CONFUSION_MARGIN,
+        headless: bool = config.HEADLESS,
+        active_process_every: int = config.ACTIVE_PROCESS_EVERY,
+        face_backend: str = config.FACE_BACKEND,
         logger: Optional[logging.Logger] = None,
         on_recognition_update: Optional[Callable[[str, tuple, "np.ndarray"], None]] = None,
     ):
-        """
-        Initialize the face recognizer.
-
-        Args:
-            dataset_path: Path to the root folder containing family member subfolders
-            model_path: Path to YOLO face detection model
-            tolerance: Face matching tolerance (lower = more strict, default 0.6)
-            detection_confidence: Minimum YOLO detection confidence (default 0.3)
-            encoding_confidence: Minimum YOLO confidence for encoding (default 0.5)
-            padding: Padding around face for recognition
-            encoding_padding: Padding around face for creating encoding
-            max_fps_samples: Number of samples for FPS calculation
-            encodings_file: Custom path for encodings file
-            recognition_interval: Re-run face encoding every N frames; reuse cached name otherwise
-            yolo_input_width: Resize frame to this width before YOLO (0 = no resize)
-            logger: Logger instance
-        """
-        self.dataset_path = dataset_path
-        self.model_path = model_path
-        self.tolerance = tolerance
+        self.dataset_path       = dataset_path
+        self.model_path         = model_path
+        self.tolerance          = tolerance
         self.detection_confidence = detection_confidence
-        self.encoding_confidence = encoding_confidence
-        self.padding = padding
-        self.encoding_padding = encoding_padding
+        self.encoding_confidence  = encoding_confidence
+        self.padding            = padding
+        self.encoding_padding   = encoding_padding
         self.recognition_interval = recognition_interval
-        self.yolo_input_width = yolo_input_width
-        self.motion_absdiff_threshold = motion_absdiff_threshold
-        self.motion_mog2_threshold    = motion_mog2_threshold
-        self.motion_max_idle_sec      = motion_max_idle_sec
-        self.recognition_top_k   = recognition_top_k
+        self.recognition_top_k  = recognition_top_k
         self.iou_cache_threshold = iou_cache_threshold
-        self.confusion_margin    = confusion_margin
-        self.logger = logger or logging.getLogger(__name__)
+        self.confusion_margin   = confusion_margin
+        self.headless           = headless
+        self.active_process_every = max(1, active_process_every)
+        self.face_backend       = face_backend
+        self.logger             = logger or logging.getLogger(__name__)
+        self.on_recognition_update = on_recognition_update
+
+        # Phase 1: performance counters
+        self._hog_fallback_count  = 0
+        self._active_skip_counter = 0
+        self._health_faces_seen   = 0
+        self._health_start        = time.time()
 
         self._motion_guard = MotionGuard(
             absdiff_threshold=motion_absdiff_threshold,
@@ -101,196 +125,141 @@ class FaceRecognizer:
             max_idle_sec=motion_max_idle_sec,
             logger=self.logger,
         )
-        self.on_recognition_update = on_recognition_update
 
         self._validate_paths()
 
-        self.logger.info(f"Loading YOLO model from: {model_path}")
-        self.yolo_model = YOLO(model_path)
-        # One dummy inference to force JIT/ONNX graph compilation before the first real frame.
-        self.yolo_model(np.zeros((64, 64, 3), dtype=np.uint8), verbose=False)
+        # Phase 2+3: pluggable backends
+        self.logger.info("Loading backend: %s (model: %s)", face_backend, model_path)
+        self.detector, self.embedder = _build_backends(
+            face_backend, model_path, detection_confidence, yolo_input_width
+        )
 
         self.known_face_encodings: List[np.ndarray] = []
-        self.known_face_names: List[str] = []
-        self._unique_person_count: int = 0
-
+        self.known_face_names:     List[str]         = []
+        self._unique_person_count: int               = 0
         self.detection_times = deque(maxlen=max_fps_samples)
-
-        # Per-face recognition cache: list of {bbox, name, frame}
         self._face_cache: List[dict] = []
         self._frame_count: int = 0
 
         self._load_encodings(encodings_file)
+        self._start_health_log_thread()
 
-    def _validate_paths(self):
-        """Validate required paths exist"""
-        if not os.path.exists(self.model_path):
-            self.logger.error(f"Model not found: {self.model_path}")
+    # ------------------------------------------------------------------
+    # Paths & encodings
+    # ------------------------------------------------------------------
+
+    def _validate_paths(self) -> None:
+        if not os.path.exists(self.model_path) and self.face_backend == "dlib":
+            self.logger.error("Model not found: %s", self.model_path)
             raise FileNotFoundError(f"Model not found: {self.model_path}")
-
         if not os.path.exists(self.dataset_path):
-            self.logger.warning(f"Dataset not found: {self.dataset_path}")
+            self.logger.warning("Dataset not found: %s", self.dataset_path)
 
     def _get_default_encodings_path(self) -> str:
-        """Get default encodings file path (from config.ENCODINGS_DIR)."""
         return os.path.join(config.ENCODINGS_DIR, "face_encodings_hybrid.pkl")
 
-    def _load_encodings(self, encodings_file: Optional[str] = None):
-        """Load face encodings from file or create from dataset"""
+    def _load_encodings(self, encodings_file: Optional[str] = None) -> None:
         save_path = encodings_file or self._get_default_encodings_path()
-
         if os.path.exists(save_path):
-            self.logger.info("Loading existing hybrid encodings...")
+            self.logger.info("Loading encodings from %s", save_path)
             try:
-                with open(save_path, 'rb') as f:
+                with open(save_path, "rb") as f:
                     data = pickle.load(f)
-                    self.known_face_encodings = data['encodings']
-                    self.known_face_names = data['names']
-                self.logger.info(f"Loaded {len(self.known_face_encodings)} face encodings")
+                self.known_face_encodings = data["encodings"]
+                self.known_face_names     = data["names"]
+                saved_backend = data.get("backend", "dlib")
+                if saved_backend != self.face_backend:
+                    self.logger.warning(
+                        "Encodings were built with backend='%s' but current backend='%s'. "
+                        "Run rebuild_encodings to regenerate.",
+                        saved_backend, self.face_backend,
+                    )
+                self.logger.info("Loaded %d encodings", len(self.known_face_encodings))
             except Exception as e:
-                self.logger.warning(f"Error loading encodings: {e}, creating new ones...")
+                self.logger.warning("Error loading encodings: %s — rebuilding", e)
                 self._create_encodings_from_dataset(save_path)
         else:
             self._create_encodings_from_dataset(save_path)
-
         self._unique_person_count = len(set(self.known_face_names))
 
-    def _create_encodings_from_dataset(self, save_path: str):
-        """Create face encodings using YOLO detection + face_recognition"""
-        self.logger.info("Creating hybrid face encodings from dataset...")
-
+    def _create_encodings_from_dataset(self, save_path: str) -> None:
+        """Fallback: build .pkl on-the-fly from dataset. Prefer rebuild_encodings() instead."""
+        self.logger.info("Building encodings from dataset (fallback)…")
         if not os.path.exists(self.dataset_path):
-            self.logger.error(f"Dataset path does not exist: {self.dataset_path}")
+            self.logger.error("Dataset path missing: %s", self.dataset_path)
             return
 
         for person_name in os.listdir(self.dataset_path):
-            person_folder = os.path.join(self.dataset_path, person_name)
-
-            if not os.path.isdir(person_folder):
+            folder = os.path.join(self.dataset_path, person_name)
+            if not os.path.isdir(folder):
                 continue
-
-            self.logger.info(f"Processing: {person_name}")
-
-            image_files = [
-                f for f in os.listdir(person_folder)
-                if f.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp'))
-            ]
-
-            successful_encodings = 0
-
-            for image_file in image_files:
-                image_path = os.path.join(person_folder, image_file)
-
-                try:
-                    image = cv2.imread(image_path)
-                    if image is None:
-                        continue
-
-                    face_encoding = self._extract_face_encoding(image)
-
-                    if face_encoding is not None:
-                        self.known_face_encodings.append(face_encoding)
-                        self.known_face_names.append(person_name)
-                        successful_encodings += 1
-
-                except Exception as e:
-                    self.logger.debug(f"Error processing {image_file}: {e}")
+            self.logger.info("Processing: %s", person_name)
+            for fname in os.listdir(folder):
+                if not fname.lower().endswith((".jpg", ".jpeg", ".png", ".bmp")):
                     continue
-
-            self.logger.info(f"  Encoded {successful_encodings} images for {person_name}")
+                image = cv2.imread(os.path.join(folder, fname))
+                if image is None:
+                    continue
+                enc = self._extract_face_encoding(image)
+                if enc is not None:
+                    self.known_face_encodings.append(enc)
+                    self.known_face_names.append(person_name)
 
         self._save_encodings(save_path)
 
     def _extract_face_encoding(self, image: np.ndarray) -> Optional[np.ndarray]:
-        """Extract face encoding from image using YOLO + face_recognition.
-
-        Passes the YOLO bbox directly to face_encodings() as a known location,
-        skipping dlib's HOG detection step — same approach as recognize_face_in_region().
-        """
-        results = self.yolo_model(image, verbose=False)
-
-        for result in results:
-            if result.boxes is not None and len(result.boxes) > 0:
-                confidences = result.boxes.conf.cpu().numpy()
-                best_idx = np.argmax(confidences)
-                best_box = result.boxes[best_idx]
-
-                if float(best_box.conf) > self.encoding_confidence:
-                    x1, y1, x2, y2 = map(int, best_box.xyxy[0].cpu().numpy())
-                    h, w = image.shape[:2]
-
-                    # Build dlib-format location (top, right, bottom, left) from YOLO bbox.
-                    # Apply padding then clamp to image bounds.
-                    top    = max(0, y1 - self.encoding_padding)
-                    right  = min(w, x2 + self.encoding_padding)
-                    bottom = min(h, y2 + self.encoding_padding)
-                    left   = max(0, x1 - self.encoding_padding)
-
-                    try:
-                        rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-                        encodings = face_recognition.face_encodings(
-                            rgb_image, known_face_locations=[(top, right, bottom, left)]
-                        )
-                        if encodings:
-                            return encodings[0]
-                    except Exception:
-                        pass
-
+        """Extract encoding using detector + embedder (training-time path)."""
+        detections = self.detector.detect(image)
+        if detections:
+            best = max(detections, key=lambda d: d.confidence)
+            enc = self.embedder.encode(image, best, padding=self.encoding_padding)
+            if enc is not None:
+                return enc
         return self._fallback_extract_encoding(image)
 
-    def _fallback_extract_encoding(self, image: np.ndarray) -> Optional[np.ndarray]:
-        """Fallback: extract encoding directly from full image"""
+    def _fallback_extract_encoding(self, image_bgr: np.ndarray) -> Optional[np.ndarray]:
+        """HOG full-image fallback when detector misses. Logs WARNING + timing."""
+        t0 = time.time()
         try:
-            rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-            face_encodings = face_recognition.face_encodings(rgb_image)
-            return face_encodings[0] if len(face_encodings) > 0 else None
+            import face_recognition as _fr
+            rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+            encs = _fr.face_encodings(rgb)
+            elapsed_ms = (time.time() - t0) * 1000
+            if encs:
+                self._hog_fallback_count += 1
+                self.logger.warning(
+                    "HOG fallback triggered (%.0fms) — total: %d. "
+                    "Consider improving dataset image quality.",
+                    elapsed_ms, self._hog_fallback_count,
+                )
+                return encs[0]
+        except ImportError:
+            pass   # face_recognition removed in Phase 3 — graceful no-op
         except Exception:
-            return None
+            pass
+        return None
 
-    def _save_encodings(self, save_path: str):
-        """Save face encodings to file"""
+    def _save_encodings(self, save_path: str) -> None:
         try:
-            os.makedirs(os.path.dirname(save_path), exist_ok=True)
-            with open(save_path, 'wb') as f:
+            os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+            with open(save_path, "wb") as f:
                 pickle.dump({
-                    'encodings': self.known_face_encodings,
-                    'names': self.known_face_names
+                    "encodings": self.known_face_encodings,
+                    "names":     self.known_face_names,
+                    "backend":   self.face_backend,
                 }, f)
-            self.logger.info(f"Saved {len(self.known_face_encodings)} encodings to {save_path}")
+            self.logger.info("Saved %d encodings → %s", len(self.known_face_encodings), save_path)
         except Exception as e:
-            self.logger.error(f"Error saving encodings: {e}")
+            self.logger.error("Error saving encodings: %s", e)
 
-    def detect_faces_yolo(self, frame: np.ndarray) -> List[Tuple[int, int, int, int, float]]:
-        """
-        Detect faces using YOLO
-
-        Returns:
-            List of (x1, y1, x2, y2, confidence) tuples
-        """
-        try:
-            results = self.yolo_model(frame, verbose=False)
-            faces = []
-
-            for result in results:
-                if result.boxes is not None:
-                    for box in result.boxes:
-                        confidence = float(box.conf[0])
-                        if confidence > self.detection_confidence:
-                            x1, y1, x2, y2 = map(int, box.xyxy[0].cpu().numpy())
-                            faces.append((x1, y1, x2, y2, confidence))
-
-            return faces
-        except Exception as e:
-            self.logger.error(f"YOLO detection error: {e}")
-            return []
+    # ------------------------------------------------------------------
+    # IOU cache helpers
+    # ------------------------------------------------------------------
 
     @staticmethod
     def _iou(box1: Tuple, box2: Tuple) -> float:
-        """Intersection-over-Union for two (x1,y1,x2,y2) boxes"""
-        ix1 = max(box1[0], box2[0])
-        iy1 = max(box1[1], box2[1])
-        ix2 = min(box1[2], box2[2])
-        iy2 = min(box1[3], box2[3])
+        ix1 = max(box1[0], box2[0]); iy1 = max(box1[1], box2[1])
+        ix2 = min(box1[2], box2[2]); iy2 = min(box1[3], box2[3])
         inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
         a1 = (box1[2] - box1[0]) * (box1[3] - box1[1])
         a2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
@@ -298,111 +267,85 @@ class FaceRecognizer:
         return inter / union if union > 0 else 0.0
 
     def _get_cached_name(self, bbox: Tuple) -> Optional[str]:
-        """Return cached name if this face was recognized recently at the same position."""
         for entry in self._face_cache:
-            if (self._frame_count - entry['frame'] <= self.recognition_interval and
-                    self._iou(bbox, entry['bbox']) > self.iou_cache_threshold):
-                return entry['name']
+            if (self._frame_count - entry["frame"] <= self.recognition_interval and
+                    self._iou(bbox, entry["bbox"]) > self.iou_cache_threshold):
+                return entry["name"]
         return None
 
-    def _update_cache(self, bbox: Tuple, name: str):
-        """Store recognition result for this face position."""
+    def _update_cache(self, bbox: Tuple, name: str) -> None:
         self._face_cache = [
             e for e in self._face_cache
-            if self._iou(bbox, e['bbox']) <= self.iou_cache_threshold
+            if self._iou(bbox, e["bbox"]) <= self.iou_cache_threshold
         ]
-        self._face_cache.append({'bbox': bbox, 'name': name, 'frame': self._frame_count})
+        self._face_cache.append({"bbox": bbox, "name": name, "frame": self._frame_count})
+
+    # ------------------------------------------------------------------
+    # Recognition
+    # ------------------------------------------------------------------
 
     def recognize_face_in_region(
         self,
-        rgb_frame: np.ndarray,
-        x1: int,
-        y1: int,
-        x2: int,
-        y2: int
+        frame_bgr: np.ndarray,
+        detection: FaceDetection,
     ) -> str:
-        """
-        Recognize face in a specific region.
+        """Recognize a detected face using the current embedder.
 
         Args:
-            rgb_frame: Full frame in RGB color space (pre-converted for efficiency)
-            x1, y1, x2, y2: YOLO bounding box coordinates in rgb_frame space
+            frame_bgr: Full BGR frame (not a crop)
+            detection: FaceDetection with bbox (and _raw_row for SFace)
         """
-        try:
-            h, w = rgb_frame.shape[:2]
+        face_encoding = self.embedder.encode(frame_bgr, detection, padding=self.padding)
+        if face_encoding is None:
+            return "No Face"
 
-            # Pass the YOLO bbox (with padding) directly as the known face location.
-            # This skips dlib's HOG face detection step inside face_encodings(),
-            # saving ~30-50% of recognition time with no accuracy loss.
-            top    = max(0, y1 - self.padding)
-            right  = min(w, x2 + self.padding)
-            bottom = min(h, y2 + self.padding)
-            left   = max(0, x1 - self.padding)
-            face_location = (top, right, bottom, left)  # face_recognition: (top, right, bottom, left)
+        if not self.known_face_encodings:
+            return "No Training Data"
 
-            face_encodings = face_recognition.face_encodings(
-                rgb_frame, known_face_locations=[face_location]
+        distances = self.embedder.batch_distance(self.known_face_encodings, face_encoding)
+
+        # Top-K weighted voting: weight = (1 - distance) → closer encodings vote harder
+        k = min(self.recognition_top_k, len(distances))
+        top_k_idx = np.argsort(distances)[:k]
+
+        votes: dict = {}
+        for idx in top_k_idx:
+            if distances[idx] <= self.tolerance:
+                person = self.known_face_names[idx]
+                votes[person] = votes.get(person, 0.0) + (1.0 - distances[idx])
+
+        if not votes:
+            return "Unknown"
+
+        winner = max(votes, key=lambda p: votes[p])
+        best_dist = min(distances[i] for i in top_k_idx if self.known_face_names[i] == winner)
+
+        # Margin guard: reject if runner-up is too close (prevents family member confusion)
+        if len(set(self.known_face_names)) > 1:
+            second_best_dist = min(
+                (distances[i] for i, n in enumerate(self.known_face_names) if n != winner),
+                default=float("inf"),
             )
+            if second_best_dist - best_dist < self.confusion_margin:
+                return "Unknown"
 
-            if len(face_encodings) == 0:
-                return "No Face"
+        return f"{winner} ({1.0 - best_dist:.2f})"
 
-            face_encoding = face_encodings[0]
-
-            if len(self.known_face_encodings) > 0:
-                distances = face_recognition.face_distance(
-                    self.known_face_encodings,
-                    face_encoding
-                )
-
-                # Top-K weighted voting: lấy K encoding gần nhất trong ngưỡng tolerance,
-                # weight = (1 - distance) để encoding gần hơn có ảnh hưởng lớn hơn.
-                k = min(self.recognition_top_k, len(distances))
-                top_k_idx = np.argsort(distances)[:k]
-
-                votes: dict = {}
-                for idx in top_k_idx:
-                    if distances[idx] <= self.tolerance:
-                        person = self.known_face_names[idx]
-                        weight = 1.0 - distances[idx]
-                        votes[person] = votes.get(person, 0.0) + weight
-
-                if votes:
-                    winner = max(votes, key=lambda p: votes[p])
-                    best_dist = min(
-                        distances[i] for i in top_k_idx
-                        if self.known_face_names[i] == winner
-                    )
-
-                    # Margin guard: nếu người thứ 2 quá gần → không đủ tự tin phân biệt
-                    # (quan trọng với người thân/bạn bè có embedding gần nhau)
-                    if len(set(self.known_face_names)) > 1:
-                        second_best_dist = min(
-                            (distances[i] for i, name in enumerate(self.known_face_names)
-                             if name != winner),
-                            default=float('inf')
-                        )
-                        if second_best_dist - best_dist < self.confusion_margin:
-                            return "Unknown"
-
-                    confidence = 1.0 - best_dist
-                    return f"{winner} ({confidence:.2f})"
-                else:
-                    return "Unknown"
-            else:
-                return "No Training Data"
-
-        except Exception as e:
-            self.logger.debug(f"Recognition error: {e}")
-            return "Error"
+    def detect_faces_yolo(
+        self, frame: np.ndarray
+    ) -> List[Tuple[int, int, int, int, float]]:
+        """Compatibility shim — delegates to self.detector.detect()."""
+        return [
+            (d.bbox[0], d.bbox[1], d.bbox[2], d.bbox[3], d.confidence)
+            for d in self.detector.detect(frame)
+        ]
 
     def draw_results(
         self,
         frame: np.ndarray,
         detections: List[Tuple[int, int, int, int, float]],
-        names: List[str]
+        names: List[str],
     ) -> np.ndarray:
-        """Draw detection results on frame"""
         for (x1, y1, x2, y2, conf), name in zip(detections, names):
             if "Unknown" in name:
                 color = (0, 165, 255)
@@ -414,39 +357,65 @@ class FaceRecognizer:
                 color = (0, 255, 0)
 
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-
-            det_text = f"Det: {conf:.2f}"
-            cv2.putText(frame, det_text, (x1, y1 - 25),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
-
+            cv2.putText(frame, f"Det: {conf:.2f}", (x1, y1 - 25),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
             cv2.rectangle(frame, (x1, y2), (x1 + 200, y2 + 25), color, cv2.FILLED)
             cv2.putText(frame, name, (x1 + 5, y2 + 18),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
         return frame
 
-    def run_recognition(self, camera_id: int = 0, frame_width: int = 1280, frame_height: int = 720):
-        """Main recognition loop"""
-        self.logger.info("Starting face recognition...")
-        self.logger.info(f"  Tolerance: {self.tolerance}")
-        self.logger.info(f"  Detection confidence: {self.detection_confidence}")
-        self.logger.info(f"  Recognition interval: every {self.recognition_interval} frames")
-        self.logger.info(f"  YOLO input width: {self.yolo_input_width}px")
-        self.logger.info("Press 'q' to quit")
+    # ------------------------------------------------------------------
+    # Health log (Phase 1)
+    # ------------------------------------------------------------------
+
+    def _start_health_log_thread(self) -> None:
+        def _worker():
+            while True:
+                time.sleep(3600)
+                avg_time = float(np.mean(self.detection_times)) if self.detection_times else 0
+                fps = 1.0 / avg_time if avg_time > 0 else 0
+                self.logger.info(
+                    "[HEALTH] uptime=%.1fh | fps=%.1f | state=%s | "
+                    "faces_seen=%d | hog_fallback=%d | backend=%s",
+                    (time.time() - self._health_start) / 3600,
+                    fps,
+                    self._motion_guard.state.name,
+                    self._health_faces_seen,
+                    self._hog_fallback_count,
+                    self.face_backend,
+                )
+                self._health_faces_seen = 0  # reset per-hour counter
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    # ------------------------------------------------------------------
+    # Main recognition loop
+    # ------------------------------------------------------------------
+
+    def run_recognition(
+        self,
+        camera_id: int = 0,
+        frame_width: int = 1280,
+        frame_height: int = 720,
+    ) -> None:
+        self.logger.info("Starting face recognition…")
+        self.logger.info("  Backend: %s | Headless: %s | ACTIVE_PROCESS_EVERY: %d",
+                         self.face_backend, self.headless, self.active_process_every)
+        self.logger.info("  Tolerance: %.2f | Recognition interval: %d frames",
+                         self.tolerance, self.recognition_interval)
+        if not self.headless:
+            self.logger.info("  Press 'q' to quit")
 
         cap = cv2.VideoCapture(camera_id)
-
         if not cap.isOpened():
-            self.logger.error("Cannot open webcam")
+            self.logger.error("Cannot open camera %d", camera_id)
             return
 
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, frame_width)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, frame_height)
+        self.logger.info("Camera opened: %dx%d", frame_width, frame_height)
 
-        self.logger.info(f"Camera opened: {frame_width}x{frame_height}")
-
-        # --- Capture thread: always keeps the latest frame ready ---
-        # This decouples camera I/O from processing so frames don't queue up.
+        # Capture thread: decouple camera I/O from processing
         frame_queue: queue.Queue = queue.Queue(maxsize=1)
         stop_capture = threading.Event()
 
@@ -456,7 +425,6 @@ class FaceRecognizer:
                 if not ret:
                     frame_queue.put((False, None))
                     return
-                # Drop stale frame if main loop hasn't consumed it yet
                 if frame_queue.full():
                     try:
                         frame_queue.get_nowait()
@@ -467,13 +435,9 @@ class FaceRecognizer:
         capture_thread = threading.Thread(target=_capture_worker, daemon=True)
         capture_thread.start()
 
-        # Pre-compute YOLO scale factor once
-        yolo_scale: float = 1.0
-        if self.yolo_input_width and self.yolo_input_width < frame_width:
-            yolo_scale = self.yolo_input_width / frame_width
-
         _last_face_detections:     List[Tuple[int, int, int, int, float]] = []
         _last_recognition_results: List[str]                               = []
+        _active_skip = 0   # ACTIVE_PROCESS_EVERY counter (local to loop)
 
         try:
             while True:
@@ -481,232 +445,132 @@ class FaceRecognizer:
 
                 ret, frame = frame_queue.get()
                 if not ret:
-                    self.logger.error("Error reading frame")
+                    self.logger.error("Camera read error — stopping")
                     break
 
                 self._frame_count += 1
 
-                # --- State machine (IDLE/ACTIVE) ---
-                # IDLE: chỉ check motion mỗi N frame → ~2% CPU
-                # ACTIVE: chạy full pipeline mỗi frame
+                # --- State machine (IDLE / ACTIVE) ---
                 _should_run = self._motion_guard.should_process(frame)
 
+                # Phase 1: ACTIVE throttle — skip frames to reduce CPU when ACTIVE
+                if _should_run and self.active_process_every > 1 and self._motion_guard.is_active:
+                    _active_skip = (_active_skip + 1) % self.active_process_every
+                    if _active_skip != 0:
+                        _should_run = False
+
                 if _should_run:
-                    # --- YOLO detection on a downscaled frame ---
-                    if yolo_scale < 1.0:
-                        small_h = int(frame_height * yolo_scale)
-                        small_frame = cv2.resize(frame, (self.yolo_input_width, small_h))
-                        small_detections = self.detect_faces_yolo(small_frame)
-                        inv = 1.0 / yolo_scale
-                        face_detections = [
-                            (int(x1 * inv), int(y1 * inv), int(x2 * inv), int(y2 * inv), c)
-                            for x1, y1, x2, y2, c in small_detections
-                        ]
-                    else:
-                        face_detections = self.detect_faces_yolo(frame)
+                    # --- Detection (detector handles resize/scale internally) ---
+                    raw_detections = self.detector.detect(frame)
+                    face_detections = [
+                        (d.bbox[0], d.bbox[1], d.bbox[2], d.bbox[3], d.confidence)
+                        for d in raw_detections
+                    ]
 
-                    # Báo cho MotionGuard biết có bao nhiêu mặt → quyết định về IDLE
                     self._motion_guard.report_faces(len(face_detections))
-
-                    # Convert BGR→RGB once per active frame (not once per face)
-                    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
                     # Prune stale cache entries
                     self._face_cache = [
                         e for e in self._face_cache
-                        if self._frame_count - e['frame'] <= self.recognition_interval * 2
+                        if self._frame_count - e["frame"] <= self.recognition_interval * 2
                     ]
 
-                    recognition_results = []
-                    for x1, y1, x2, y2, conf in face_detections:
+                    recognition_results: List[str] = []
+                    for i, (x1, y1, x2, y2, conf) in enumerate(face_detections):
                         bbox = (x1, y1, x2, y2)
                         cached = self._get_cached_name(bbox)
                         if cached is not None:
                             recognition_results.append(cached)
                         else:
-                            name = self.recognize_face_in_region(rgb_frame, x1, y1, x2, y2)
+                            name = self.recognize_face_in_region(frame, raw_detections[i])
                             self._update_cache(bbox, name)
                             recognition_results.append(name)
-                            # Fire raw callback BEFORE draw_results() modifies frame in-place.
-                            # frame.copy() ensures the snapshot is clean (no bounding boxes).
                             if self.on_recognition_update is not None:
                                 try:
                                     self.on_recognition_update(name, bbox, frame.copy())
-                                except Exception as _cb_err:
-                                    self.logger.debug("on_recognition_update error: %s", _cb_err)
+                                except Exception as _e:
+                                    self.logger.debug("on_recognition_update error: %s", _e)
 
                     _last_face_detections     = face_detections
                     _last_recognition_results = recognition_results
+
+                    if face_detections:
+                        self._health_faces_seen += len(face_detections)
                 else:
-                    # IDLE hoặc skip frame: tái dùng kết quả cũ — không chạy YOLO hay dlib
                     face_detections     = _last_face_detections
                     recognition_results = _last_recognition_results
 
-                if face_detections and recognition_results:
-                    frame = self.draw_results(frame, face_detections, recognition_results)
-
+                # --- Display (headless guard) ---
                 detection_time = time.time() - start_time
                 self.detection_times.append(detection_time)
 
-                avg_time = np.mean(self.detection_times)
-                fps = 1.0 / avg_time if avg_time > 0 else 0
+                if not self.headless:
+                    if face_detections and recognition_results:
+                        frame = self.draw_results(frame, face_detections, recognition_results)
 
-                _state_label = self._motion_guard.state.name   # "IDLE" hoặc "ACTIVE"
-                _indicator   = "A" if _should_run else "I"
-                info_text = [
-                    f"FPS: {fps:.1f} [{_state_label}|{_indicator}]",
-                    f"Faces: {len(face_detections)}",
-                    f"Known: {self._unique_person_count} people",
-                    f"Encodings: {len(self.known_face_encodings)}"
-                ]
+                    avg_time = float(np.mean(self.detection_times))
+                    fps = 1.0 / avg_time if avg_time > 0 else 0
+                    _state  = self._motion_guard.state.name
+                    _ind    = "A" if _should_run else "I"
+                    for i, text in enumerate([
+                        f"FPS: {fps:.1f} [{_state}|{_ind}]",
+                        f"Faces: {len(face_detections)}",
+                        f"Known: {self._unique_person_count} people",
+                        f"Backend: {self.face_backend}",
+                    ]):
+                        cv2.putText(frame, text, (10, 30 + i * 25),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
 
-                for i, text in enumerate(info_text):
-                    y_pos = 30 + i * 25
-                    cv2.putText(frame, text, (10, y_pos),
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-
-                cv2.imshow('Face Recognition', frame)
-
-                key = cv2.waitKey(1) & 0xFF
-                if key == ord('q'):
-                    break
+                    cv2.imshow("Face Recognition", frame)
+                    key = cv2.waitKey(1) & 0xFF
+                    if key == ord("q"):
+                        break
 
         except KeyboardInterrupt:
             self.logger.info("Stopped by user")
-
         finally:
             stop_capture.set()
             cap.release()
-            cv2.destroyAllWindows()
-            self.logger.info("Recognition system stopped")
+            if not self.headless:
+                cv2.destroyAllWindows()
+            self.logger.info("Recognition stopped. HOG fallbacks: %d", self._hog_fallback_count)
 
+
+# ---------------------------------------------------------------------------
+# Standalone entry point (python src/core/recognizer.py)
+# ---------------------------------------------------------------------------
 
 def parse_args() -> argparse.Namespace:
-    """Parse command line arguments"""
     parser = argparse.ArgumentParser(
         description="Face Recognition System",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-
-    parser.add_argument(
-        '--dataset', '-d',
-        type=str,
-        default=config.DATASET_PATH,
-        help='Path to dataset folder containing person subfolders'
-    )
-
-    parser.add_argument(
-        '--model', '-m',
-        type=str,
-        default=config.MODEL_PATH,
-        help='Path to YOLO face detection model'
-    )
-
-    parser.add_argument(
-        '--tolerance', '-t',
-        type=float,
-        default=config.TOLERANCE,
-        help='Face matching tolerance (lower = more strict)'
-    )
-
-    parser.add_argument(
-        '--detection-confidence',
-        type=float,
-        default=config.DETECTION_CONFIDENCE,
-        help='Minimum YOLO detection confidence'
-    )
-
-    parser.add_argument(
-        '--encoding-confidence',
-        type=float,
-        default=config.ENCODING_CONFIDENCE,
-        help='Minimum YOLO confidence for encoding'
-    )
-
-    parser.add_argument(
-        '--padding', '-p',
-        type=int,
-        default=config.RECOGNITION_PADDING,
-        help='Padding around face for recognition'
-    )
-
-    parser.add_argument(
-        '--encodings-file',
-        type=str,
-        default=None,
-        help='Custom path for encodings file'
-    )
-
-    parser.add_argument(
-        '--camera', '-c',
-        type=int,
-        default=0,
-        help='Camera device ID'
-    )
-
-    parser.add_argument(
-        '--width',
-        type=int,
-        default=config.FRAME_WIDTH,
-        help='Camera frame width'
-    )
-
-    parser.add_argument(
-        '--height',
-        type=int,
-        default=config.FRAME_HEIGHT,
-        help='Camera frame height'
-    )
-
-    parser.add_argument(
-        '--recognition-interval',
-        type=int,
-        default=config.RECOGNITION_INTERVAL,
-        help='Re-run face encoding every N frames; higher = faster but slower name updates'
-    )
-
-    parser.add_argument(
-        '--yolo-input-width',
-        type=int,
-        default=config.YOLO_INPUT_WIDTH,
-        help='Resize frame to this width before YOLO (0 = no resize)'
-    )
-
-    parser.add_argument(
-        '--motion-absdiff',
-        type=float,
-        default=config.MOTION_ABSDIFF_THRESHOLD,
-        help='Ngưỡng absdiff phát hiện chuyển động (thấp=nhạy hơn, 0=tắt gate)'
-    )
-
-    parser.add_argument(
-        '--motion-mog2',
-        type=float,
-        default=config.MOTION_MOG2_THRESHOLD,
-        help='Ngưỡng %% pixels MOG2 xác nhận motion thật (thấp=nhạy hơn)'
-    )
-
-    parser.add_argument(
-        '--motion-idle',
-        type=float,
-        default=config.MOTION_MAX_IDLE_SEC,
-        help='Giây tối đa không chạy YOLO trước khi force-run (fallback người đứng yên)'
-    )
-
-    parser.add_argument(
-        '--verbose', '-v',
-        action='store_true',
-        help='Enable verbose logging'
-    )
-
+    parser.add_argument("--dataset", "-d", default=config.DATASET_PATH)
+    parser.add_argument("--model", "-m", default=config.MODEL_PATH)
+    parser.add_argument("--tolerance", "-t", type=float, default=config.TOLERANCE)
+    parser.add_argument("--detection-confidence", type=float, default=config.DETECTION_CONFIDENCE)
+    parser.add_argument("--encoding-confidence", type=float, default=config.ENCODING_CONFIDENCE)
+    parser.add_argument("--padding", "-p", type=int, default=config.RECOGNITION_PADDING)
+    parser.add_argument("--encodings-file", default=None)
+    parser.add_argument("--camera", "-c", type=int, default=0)
+    parser.add_argument("--width", type=int, default=config.FRAME_WIDTH)
+    parser.add_argument("--height", type=int, default=config.FRAME_HEIGHT)
+    parser.add_argument("--recognition-interval", type=int, default=config.RECOGNITION_INTERVAL)
+    parser.add_argument("--yolo-input-width", type=int, default=config.YOLO_INPUT_WIDTH)
+    parser.add_argument("--motion-absdiff", type=float, default=config.MOTION_ABSDIFF_THRESHOLD)
+    parser.add_argument("--motion-mog2", type=float, default=config.MOTION_MOG2_THRESHOLD)
+    parser.add_argument("--motion-idle", type=float, default=config.MOTION_MAX_IDLE_SEC)
+    parser.add_argument("--headless", action="store_true", default=config.HEADLESS)
+    parser.add_argument("--active-process-every", type=int, default=config.ACTIVE_PROCESS_EVERY)
+    parser.add_argument("--face-backend", default=config.FACE_BACKEND,
+                        choices=["dlib", "sface"], help="Detection+embedding backend")
+    parser.add_argument("--verbose", "-v", action="store_true")
     return parser.parse_args()
 
 
 def main():
-    """Main function"""
     args = parse_args()
     logger = setup_logging(args.verbose)
-
     try:
         recognizer = FaceRecognizer(
             dataset_path=args.dataset,
@@ -721,20 +585,21 @@ def main():
             motion_absdiff_threshold=args.motion_absdiff,
             motion_mog2_threshold=args.motion_mog2,
             motion_max_idle_sec=args.motion_idle,
-            logger=logger
+            headless=args.headless,
+            active_process_every=args.active_process_every,
+            face_backend=args.face_backend,
+            logger=logger,
         )
-
         recognizer.run_recognition(
             camera_id=args.camera,
             frame_width=args.width,
-            frame_height=args.height
+            frame_height=args.height,
         )
-
     except FileNotFoundError as e:
-        logger.error(f"File not found: {e}")
+        logger.error("File not found: %s", e)
         sys.exit(1)
     except Exception as e:
-        logger.error(f"Error: {e}")
+        logger.error("Error: %s", e)
         if args.verbose:
             import traceback
             traceback.print_exc()

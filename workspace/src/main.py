@@ -53,6 +53,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--recognition-interval", type=int, default=config.RECOGNITION_INTERVAL)
     parser.add_argument("--yolo-input-width", type=int, default=config.YOLO_INPUT_WIDTH)
     parser.add_argument("--verbose", "-v", action="store_true")
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        default=config.HEADLESS,
+        help="Tắt cv2.imshow (bắt buộc trên Pi headless — hoặc set HEADLESS=true trong .env)",
+    )
+    parser.add_argument(
+        "--active-process-every",
+        type=int,
+        default=config.ACTIVE_PROCESS_EVERY,
+        help="Chạy full pipeline mỗi N frame khi ACTIVE (NUC: 1, Pi5: 2-3)",
+    )
+    parser.add_argument(
+        "--face-backend",
+        default=config.FACE_BACKEND,
+        choices=["dlib", "sface"],
+        help="Backend: 'dlib' (YOLO+face_recognition) hoặc 'sface' (YuNet+SFace)",
+    )
 
     # --- Smart home extension args ---
     parser.add_argument("--no-alerts", action="store_true", help="Tắt cảnh báo người lạ")
@@ -159,6 +177,9 @@ def main() -> None:
             encodings_file=args.encodings_file,
             recognition_interval=args.recognition_interval,
             yolo_input_width=args.yolo_input_width,
+            headless=args.headless,
+            active_process_every=args.active_process_every,
+            face_backend=args.face_backend,
             logger=logger,
             on_recognition_update=on_recognition_update,
         )

@@ -66,15 +66,17 @@ class VideoFrameExtractor:
 
     def __init__(
         self,
-        yolo_model,
+        yolo_model=None,
         quality_checker: Optional[FrameQualityChecker] = None,
         diversity_filter: Optional[FrameDiversityFilter] = None,
         frame_skip: int = FRAME_SKIP,
         detect_conf: float = config.FRAME_DETECT_CONF,
+        detector=None,   # Optional FaceDetector (Phase 3: pass YuNetDetector)
     ):
         self.yolo_model = yolo_model
-        self.quality = quality_checker or FrameQualityChecker()
-        self.diversity = diversity_filter or FrameDiversityFilter()
+        self._detector  = detector   # takes priority over yolo_model when set
+        self.quality    = quality_checker or FrameQualityChecker()
+        self.diversity  = diversity_filter or FrameDiversityFilter()
         self.frame_skip = frame_skip
         self.detect_conf = detect_conf
 
@@ -109,7 +111,7 @@ class VideoFrameExtractor:
                     continue
 
                 timestamp = frame_num / fps
-                face_crop = self._detect_best_face(frame)
+                face_crop, det_conf = self._detect_best_face(frame)
                 if face_crop is None:
                     continue
 
@@ -127,7 +129,7 @@ class VideoFrameExtractor:
                     quality_score=self.quality.score(face_crop),
                     source_frame_num=frame_num,
                     timestamp=timestamp,
-                    detection_conf=0.0,
+                    detection_conf=det_conf,
                 )
         finally:
             cap.release()
@@ -311,12 +313,25 @@ class VideoFrameExtractor:
 
     def _detect_best_face(
         self, frame: np.ndarray
-    ) -> Optional[np.ndarray]:
-        """Return the best face crop from YOLO (or HOG fallback), or None."""
-        crop, _, _ = self._detect_face(frame)
+    ) -> tuple:
+        """Return (face_crop, conf) of the best detected face, or (None, 0.0).
+
+        Uses self._detector (FaceDetector interface) when provided (Phase 3),
+        otherwise falls back to YOLO + HOG path.
+        """
+        if self._detector is not None:
+            detections = self._detector.detect(frame)
+            if detections:
+                best = max(detections, key=lambda d: d.confidence)
+                x1, y1, x2, y2 = best.bbox
+                crop = extract_face_region(frame, x1, y1, x2, y2, config.LEARNING_PADDING)
+                return crop, best.confidence
+            return None, 0.0
+
+        crop, _, conf = self._detect_face(frame)
         if crop is None:
-            crop, _, _ = self._detect_face_hog(frame)
-        return crop
+            crop, _, conf = self._detect_face_hog(frame)
+        return crop, conf
 
     def _extract_internal(
         self,
@@ -353,7 +368,7 @@ class VideoFrameExtractor:
                     continue
 
                 timestamp = frame_num / fps
-                face_crop = self._detect_best_face(frame)
+                face_crop, det_conf = self._detect_best_face(frame)
                 if face_crop is None:
                     continue
 
@@ -371,7 +386,7 @@ class VideoFrameExtractor:
                     quality_score=self.quality.score(face_crop),
                     source_frame_num=frame_num,
                     timestamp=timestamp,
-                    detection_conf=0.0,
+                    detection_conf=det_conf,
                 )
         finally:
             cap.release()
@@ -440,11 +455,23 @@ class VideoFrameExtractor:
         Dict keys: bbox, conf, overall, sharpness, brightness, brightness_raw,
                    size, contrast, guidance, guidance_color
         """
-        face_crop, bbox, conf = self._detect_face(frame)
-        if face_crop is None:
-            face_crop, bbox, conf = self._detect_face_hog(frame)
-        if face_crop is None:
-            return None
+        if self._detector is not None:
+            detections = self._detector.detect(frame)
+            if not detections:
+                return None
+            best = max(detections, key=lambda d: d.confidence)
+            x1, y1, x2, y2 = best.bbox
+            face_crop = extract_face_region(frame, x1, y1, x2, y2, config.LEARNING_PADDING)
+            bbox = (x1, y1, x2, y2)
+            conf = best.confidence
+            if face_crop is None:
+                return None
+        else:
+            face_crop, bbox, conf = self._detect_face(frame)
+            if face_crop is None:
+                face_crop, bbox, conf = self._detect_face_hog(frame)
+            if face_crop is None:
+                return None
 
         scores = self.quality.breakdown(face_crop)
 

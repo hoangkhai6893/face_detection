@@ -1,7 +1,4 @@
 .env
-**/**/*.jpg
-**/**/*.jpeg
-**/**/**/*.jng
 log/
 logs/
 .cache/
@@ -20,3 +17,7 @@ tests/__pycache__
 *.db
 *.sqlite3
 *.egg-info/
+**/**/*.jpg
+**/**/*.jpeg
+**/**/**/*.jng
+**/*.mp4

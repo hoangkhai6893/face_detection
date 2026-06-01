@@ -152,3 +152,39 @@ IDLE_SAMPLE_EVERY = 6
 # ACTIVE → IDLE: sau bao nhiêu frame liên tiếp YOLO không thấy mặt nào
 # 150 frames ≈ 5 giây tại 30fps
 IDLE_NO_FACE_FRAMES = 150
+
+# =============================================================================
+# --- Phase 1: Pi-Ready & 24/7 ---
+# =============================================================================
+
+# Headless mode: tắt cv2.imshow/putText/waitKey — bắt buộc khi không có X server.
+# Set HEADLESS=true trong .env khi deploy Pi.
+HEADLESS: bool = os.environ.get("HEADLESS", "false").lower() == "true"
+
+# ACTIVE pipeline throttle: chỉ chạy full pipeline (detect + embed) mỗi N frame khi ACTIVE.
+# Frame skip tái dùng kết quả cũ — không ảnh hưởng đến IDLE/probe logic.
+# NUC dev: 1 (no throttle); Pi5: 2–3; Pi4: 3–4.
+ACTIVE_PROCESS_EVERY: int = int(os.environ.get("ACTIVE_PROCESS_EVERY", "1"))
+
+# =============================================================================
+# --- Phase 2+3: Backend Selection (YuNet + SFace migration) ---
+# =============================================================================
+
+# Backend: "dlib" = YOLO + face_recognition (mặc định, stack hiện tại)
+#          "sface" = YuNet + SFace (target, cần Phase 3 model files)
+FACE_BACKEND: str = os.environ.get("FACE_BACKEND", "dlib")
+
+# Model paths cho YuNet + SFace (Phase 3)
+YUNET_MODEL_PATH: str = os.environ.get(
+    "YUNET_MODEL_PATH",
+    os.path.join(_SRC_DIR, "yolo", "yunet_int8.onnx"),
+)
+SFACE_MODEL_PATH: str = os.environ.get(
+    "SFACE_MODEL_PATH",
+    os.path.join(_WORKSPACE_DIR, "model", "sface_int8.onnx"),
+)
+
+# SFace cosine distance thresholds (retune sau Phase 4 trên data gia đình thật)
+# Tham chiếu official: cosine_score >= 0.363 → same person → distance = 1 - 0.363 = 0.637
+SFACE_TOLERANCE: float = float(os.environ.get("SFACE_TOLERANCE", "0.50"))
+SFACE_CONFUSION_MARGIN: float = float(os.environ.get("SFACE_CONFUSION_MARGIN", "0.08"))

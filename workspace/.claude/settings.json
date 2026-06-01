@@ -62,7 +62,8 @@
       "Bash(cat ~/.claude/channels/telegram/.env 2>/dev/null && echo \"---EXISTS---\" || echo \"---NOT_FOUND---\")",
       "Read(//home/ubuntu/.claude/channels/telegram/**)",
       "Bash(cat ~/.claude/channels/telegram/access.json 2>/dev/null && echo \"---EXISTS---\" || echo \"---NOT_FOUND---\")",
-      "Bash(pip show *)"
+      "Bash(pip show *)",
+      "Bash(chmod +x /home/ubuntu/workspace/scripts/install_service.sh)"
     ],
     "additionalDirectories": [
       "/home/dkhai/.claude/projects/-home-dkhai-workspace/memory"
